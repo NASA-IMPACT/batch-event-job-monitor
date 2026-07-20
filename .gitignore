@@ -109,6 +109,7 @@ ENV/
 package.zip
 
 cdk.out/
+.superpowers/
 .vscode/
 .vim/
 node_modules/
