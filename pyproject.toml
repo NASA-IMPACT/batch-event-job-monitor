@@ -1,0 +1,58 @@
+[project]
+name = "hls-batch-job-monitoring"
+version = "0.1.0"
+description = "Reusable AWS Batch job logging/monitoring: S3 log store, Lambda job monitor, CDK constructs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3",
+]
+
+[dependency-groups]
+dev = [
+    "aws-lambda-typing>=2.20.0",
+    "boto3-stubs[batch,s3,sqs]>=1.37.36",
+    "moto>=5.1.3",
+    "mypy>=1.15.0",
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+    "ruff>=0.11.4",
+]
+deploy = [
+    "aws-cdk-aws-lambda-python-alpha>=2.191.0a0",
+    "aws-cdk-lib>=2.188.0",
+    "constructs>=10.4.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hls_batch_job_monitoring", "src/hls_batch_job_monitoring_cdk"]
+
+[tool.uv]
+package = true
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "hls_batch_job_monitoring",
+    "hls_batch_job_monitoring_cdk",
+]
+combine-as-imports = true
+
+[tool.mypy]
+files = ["src", "tests"]
+strict = true
