@@ -55,7 +55,7 @@ class TestRetryPolicy:
         """Test that RetryPolicy is frozen (immutable)."""
         policy = RetryPolicy()
         with pytest.raises(AttributeError):
-            policy.max_attempts = 5
+            policy.max_attempts = 5  # type: ignore[misc]
 
 
 class TestIsTerminal:
