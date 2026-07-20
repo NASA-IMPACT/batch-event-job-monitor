@@ -33,7 +33,7 @@ packages = ["src/hls_batch_job_monitoring", "src/hls_batch_job_monitoring_cdk"]
 
 [tool.uv]
 package = true
-default-groups = ["dev"]
+default-groups = ["dev", "deploy"]
 
 [tool.pytest.ini_options]
 testpaths = [
