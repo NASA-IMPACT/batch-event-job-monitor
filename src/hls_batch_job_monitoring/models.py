@@ -54,7 +54,7 @@ class ProcessingEventRecord:
     """Record of a processing event."""
 
     state: str
-    ts: str
+    timestamp: str
     batch_job_id: str | None = None
     exit_code: int | None = None
 

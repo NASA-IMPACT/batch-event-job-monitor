@@ -122,10 +122,10 @@ class TestProcessingEventRecord:
         """Test ProcessingEventRecord with required fields."""
         record = ProcessingEventRecord(
             state="SUCCESS",
-            ts="2024-01-01T00:00:00Z",
+            timestamp="2024-01-01T00:00:00Z",
         )
         assert record.state == "SUCCESS"
-        assert record.ts == "2024-01-01T00:00:00Z"
+        assert record.timestamp == "2024-01-01T00:00:00Z"
         assert record.batch_job_id is None
         assert record.exit_code is None
 
@@ -133,12 +133,12 @@ class TestProcessingEventRecord:
         """Test ProcessingEventRecord with all fields."""
         record = ProcessingEventRecord(
             state="SUCCESS",
-            ts="2024-01-01T00:00:00Z",
+            timestamp="2024-01-01T00:00:00Z",
             batch_job_id="batch-123",
             exit_code=0,
         )
         assert record.state == "SUCCESS"
-        assert record.ts == "2024-01-01T00:00:00Z"
+        assert record.timestamp == "2024-01-01T00:00:00Z"
         assert record.batch_job_id == "batch-123"
         assert record.exit_code == 0
 
@@ -146,14 +146,14 @@ class TestProcessingEventRecord:
         """Test that to_dict() drops fields with None values."""
         record = ProcessingEventRecord(
             state="SUCCESS",
-            ts="2024-01-01T00:00:00Z",
+            timestamp="2024-01-01T00:00:00Z",
             batch_job_id=None,
             exit_code=None,
         )
         result = record.to_dict()
         assert result == {
             "state": "SUCCESS",
-            "ts": "2024-01-01T00:00:00Z",
+            "timestamp": "2024-01-01T00:00:00Z",
         }
         assert "batch_job_id" not in result
         assert "exit_code" not in result
@@ -162,14 +162,14 @@ class TestProcessingEventRecord:
         """Test that to_dict() includes fields with non-None values."""
         record = ProcessingEventRecord(
             state="FAILURE_RETRYABLE",
-            ts="2024-01-01T00:00:00Z",
+            timestamp="2024-01-01T00:00:00Z",
             batch_job_id="batch-456",
             exit_code=1,
         )
         result = record.to_dict()
         assert result == {
             "state": "FAILURE_RETRYABLE",
-            "ts": "2024-01-01T00:00:00Z",
+            "timestamp": "2024-01-01T00:00:00Z",
             "batch_job_id": "batch-456",
             "exit_code": 1,
         }
@@ -178,14 +178,14 @@ class TestProcessingEventRecord:
         """Test to_dict() with some None and some non-None fields."""
         record = ProcessingEventRecord(
             state="SUCCESS",
-            ts="2024-01-01T00:00:00Z",
+            timestamp="2024-01-01T00:00:00Z",
             batch_job_id="batch-789",
             exit_code=None,
         )
         result = record.to_dict()
         assert result == {
             "state": "SUCCESS",
-            "ts": "2024-01-01T00:00:00Z",
+            "timestamp": "2024-01-01T00:00:00Z",
             "batch_job_id": "batch-789",
         }
         assert "exit_code" not in result
@@ -194,7 +194,7 @@ class TestProcessingEventRecord:
         """Test that to_dict() returns a dict."""
         record = ProcessingEventRecord(
             state="SUCCESS",
-            ts="2024-01-01T00:00:00Z",
+            timestamp="2024-01-01T00:00:00Z",
         )
         result = record.to_dict()
         assert isinstance(result, dict)
