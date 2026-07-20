@@ -24,7 +24,14 @@ _PARTITION_KEYS = [
         "job_type", "string", "enum", enum_values=("monthly-composite",)
     ),
     PartitionKeySpec("tile_id", "string", "enum", enum_values=("12TVK", "13TVK")),
-    PartitionKeySpec("year_month", "string", "date", date_range=("2020-01", "NOW")),
+    PartitionKeySpec(
+        "year_month",
+        "string",
+        "date",
+        date_range=("2020-01", "NOW"),
+        date_format="yyyy-MM",
+        date_interval_unit="MONTHS",
+    ),
 ]
 
 
@@ -326,6 +333,22 @@ class TestPartitionKeySpecValidation:
         with pytest.raises(ValueError, match="date_range"):
             PartitionKeySpec("year_month", "string", "date")
 
-    def test_date_projection_requires_supported_format(self) -> None:
-        with pytest.raises(ValueError, match="unsupported"):
-            PartitionKeySpec("year", "string", "date", date_range=("2020", "NOW"))
+    def test_date_projection_requires_date_format(self) -> None:
+        with pytest.raises(ValueError, match="date_format"):
+            PartitionKeySpec(
+                "year",
+                "string",
+                "date",
+                date_range=("2020", "NOW"),
+                date_interval_unit="YEARS",
+            )
+
+    def test_date_projection_requires_date_interval_unit(self) -> None:
+        with pytest.raises(ValueError, match="date_interval_unit"):
+            PartitionKeySpec(
+                "year",
+                "string",
+                "date",
+                date_range=("2020", "NOW"),
+                date_format="yyyy",
+            )

@@ -15,15 +15,6 @@ from typing import Literal
 
 from aws_cdk import aws_glue as glue
 
-# Glue partition projection requires an explicit date format and interval
-# unit, neither of which is a PartitionKeySpec field. Both are inferred from
-# the length of the date_range start value: "yyyy-MM" (7 chars) projects by
-# MONTHS, "yyyy-MM-dd" (10 chars) projects by DAYS.
-_DATE_FORMATS: dict[int, tuple[str, str]] = {
-    len("yyyy-MM"): ("yyyy-MM", "MONTHS"),
-    len("yyyy-MM-dd"): ("yyyy-MM-dd", "DAYS"),
-}
-
 
 @dataclass(frozen=True)
 class PartitionKeySpec:
@@ -45,13 +36,19 @@ class PartitionKeySpec:
     date_range : tuple[str, str] or None, optional
         (start, end) partition projection range, e.g. ("2020-01", "NOW").
         Required when projection is "date".
+    date_format : str or None, optional
+        Glue partition-projection date format string, e.g. "yyyy-MM-dd" or
+        "yyyy-MM". Required when projection is "date".
+    date_interval_unit : str or None, optional
+        Glue partition-projection date interval unit, e.g. "DAYS" or
+        "MONTHS". Required when projection is "date".
 
     Raises
     ------
     ValueError
-        If enum_values is missing for an "enum" projection, if date_range
-        is missing for a "date" projection, or if a date_range start value
-        does not match a supported date format.
+        If enum_values is missing for an "enum" projection, or if
+        date_range, date_format, or date_interval_unit is missing for a
+        "date" projection.
     """
 
     name: str
@@ -59,6 +56,8 @@ class PartitionKeySpec:
     projection: Literal["enum", "date"]
     enum_values: tuple[str, ...] | None = None
     date_range: tuple[str, str] | None = None
+    date_format: str | None = None
+    date_interval_unit: str | None = None
 
     def __post_init__(self) -> None:
         if self.projection == "enum" and self.enum_values is None:
@@ -72,10 +71,15 @@ class PartitionKeySpec:
                     f"partition key '{self.name}': date_range is required "
                     "when projection is 'date'"
                 )
-            if len(self.date_range[0]) not in _DATE_FORMATS:
+            if self.date_format is None:
                 raise ValueError(
-                    f"partition key '{self.name}': unsupported date_range "
-                    f"start value '{self.date_range[0]}'"
+                    f"partition key '{self.name}': date_format is required "
+                    "when projection is 'date'"
+                )
+            if self.date_interval_unit is None:
+                raise ValueError(
+                    f"partition key '{self.name}': date_interval_unit is "
+                    "required when projection is 'date'"
                 )
 
 
@@ -124,13 +128,14 @@ def partition_projection_parameters(
             params[f"projection.{key.name}.values"] = ",".join(key.enum_values)
         else:
             assert key.date_range is not None
+            assert key.date_format is not None
+            assert key.date_interval_unit is not None
             start, end = key.date_range
-            date_format, interval_unit = _DATE_FORMATS[len(start)]
             params[f"projection.{key.name}.type"] = "date"
-            params[f"projection.{key.name}.format"] = date_format
+            params[f"projection.{key.name}.format"] = key.date_format
             params[f"projection.{key.name}.range"] = f"{start},{end}"
             params[f"projection.{key.name}.interval"] = "1"
-            params[f"projection.{key.name}.interval.unit"] = interval_unit
+            params[f"projection.{key.name}.interval.unit"] = key.date_interval_unit
     return params
 
 
