@@ -1,10 +1,8 @@
 """Tests for S3RecordStore (three-object log schema)."""
 
 import json
-from unittest.mock import patch
 
 import pytest
-from botocore.exceptions import ClientError
 from mypy_boto3_s3 import S3Client
 
 from hls_batch_job_monitoring.log_store import S3RecordStore
@@ -205,7 +203,7 @@ class TestStatePointer:
     def test_conditional_write_second_returns_false(
         self, store: S3RecordStore
     ) -> None:
-        store.write_state_pointer_conditional(
+        written_first = store.write_state_pointer_conditional(
             job_type=JOB_TYPE,
             partition_fields=TILE_MONTH_PARTITION,
             entity_id=ENTITY_ID,
@@ -213,19 +211,15 @@ class TestStatePointer:
             state=ProcessingState.SUBMITTED,
             output_entity_id=OUTPUT_ENTITY_ID,
         )
-        # moto has a bug serializing the S3 conditional-write conflict error;
-        # patch put_object to raise the expected ClientError directly.
-        err = {"Error": {"Code": "ConditionalRequestConflict", "Message": "conflict"}}
-        conflict = ClientError(err, "PutObject")  # type: ignore[arg-type]
-        with patch.object(store.client, "put_object", side_effect=conflict):
-            written_again = store.write_state_pointer_conditional(
-                job_type=JOB_TYPE,
-                partition_fields=TILE_MONTH_PARTITION,
-                entity_id=ENTITY_ID,
-                attempt=ATTEMPT,
-                state=ProcessingState.SUBMITTED,
-                output_entity_id=OUTPUT_ENTITY_ID,
-            )
+        written_again = store.write_state_pointer_conditional(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            entity_id=ENTITY_ID,
+            attempt=ATTEMPT,
+            state=ProcessingState.SUBMITTED,
+            output_entity_id=OUTPUT_ENTITY_ID,
+        )
+        assert written_first is True
         assert written_again is False
 
     def test_delete_state_pointer(self, store: S3RecordStore, s3: S3Client) -> None:
