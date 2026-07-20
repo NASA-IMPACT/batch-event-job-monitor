@@ -26,16 +26,21 @@ class RetryPolicy:
 def is_terminal(
     state: ProcessingState, attempt: int, retry_policy: RetryPolicy
 ) -> bool:
-    """
-    Determine if a processing state is terminal.
+    """Determine if a processing state is terminal.
 
-    Args:
-        state: The current processing state
-        attempt: The current attempt number
-        retry_policy: The retry policy configuration
+    Parameters
+    ----------
+    state : ProcessingState
+        The current processing state.
+    attempt : int
+        The current attempt number.
+    retry_policy : RetryPolicy
+        The retry policy configuration.
 
-    Returns:
-        True if the state is terminal, False otherwise
+    Returns
+    -------
+    bool
+        True if the state is terminal, False otherwise.
     """
     if state in (ProcessingState.SUCCESS, ProcessingState.FAILURE_NONRETRYABLE):
         return True
@@ -54,11 +59,12 @@ class ProcessingEventRecord:
     exit_code: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """
-        Convert to dictionary, dropping None-valued fields.
+        """Convert to dictionary, dropping None-valued fields.
 
-        Returns:
-            Dictionary representation with None fields excluded
+        Returns
+        -------
+        dict[str, Any]
+            Dictionary representation with None fields excluded.
         """
         result: dict[str, Any] = {}
         for key, value in asdict(self).items():
