@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from hls_batch_job_monitoring.models import ProcessingState, RetryPolicy
+from batch_event_job_monitoring.models import ProcessingState, RetryPolicy
 
 if TYPE_CHECKING:
     from mypy_boto3_batch.type_defs import JobDetailTypeDef

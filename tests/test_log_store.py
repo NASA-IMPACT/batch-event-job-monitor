@@ -5,8 +5,8 @@ import json
 import pytest
 from mypy_boto3_s3 import S3Client
 
-from hls_batch_job_monitoring.log_store import S3RecordStore
-from hls_batch_job_monitoring.models import ProcessingEventRecord, ProcessingState
+from batch_event_job_monitoring.log_store import S3RecordStore
+from batch_event_job_monitoring.models import ProcessingEventRecord, ProcessingState
 
 JOB_TYPE = "monthly-composite"
 ENTITY_ID = "12TVK_2024-06_source"

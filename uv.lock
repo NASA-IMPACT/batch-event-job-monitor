@@ -514,7 +514,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hls-batch-job-monitoring"
+name = "batch-event-job-monitoring"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

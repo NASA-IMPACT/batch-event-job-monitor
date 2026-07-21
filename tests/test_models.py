@@ -2,7 +2,7 @@ import enum
 
 import pytest
 
-from hls_batch_job_monitoring.models import (
+from batch_event_job_monitoring.models import (
     ProcessingEventRecord,
     ProcessingState,
     RetryPolicy,

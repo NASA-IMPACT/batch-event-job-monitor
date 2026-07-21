@@ -10,14 +10,14 @@ import pytest
 from aws_cdk import App, Stack, aws_glue as glue
 from aws_cdk.assertions import Match, Template
 
-from hls_batch_job_monitoring_cdk.athena_outputs_database import (
+from batch_event_job_monitoring_cdk.athena_outputs_database import (
     AthenaOutputsDatabase,
 )
-from hls_batch_job_monitoring_cdk.athena_records_database import (
+from batch_event_job_monitoring_cdk.athena_records_database import (
     AthenaRecordsDatabase,
 )
-from hls_batch_job_monitoring_cdk.athena_state_database import AthenaStateDatabase
-from hls_batch_job_monitoring_cdk.partition_key_spec import PartitionKeySpec
+from batch_event_job_monitoring_cdk.athena_state_database import AthenaStateDatabase
+from batch_event_job_monitoring_cdk.partition_key_spec import PartitionKeySpec
 
 _PARTITION_KEYS = [
     PartitionKeySpec(

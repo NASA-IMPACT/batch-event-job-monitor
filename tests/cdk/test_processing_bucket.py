@@ -5,7 +5,7 @@ from __future__ import annotations
 from aws_cdk import App, Stack
 from aws_cdk.assertions import Match, Template
 
-from hls_batch_job_monitoring_cdk.processing_bucket import ProcessingBucket
+from batch_event_job_monitoring_cdk.processing_bucket import ProcessingBucket
 
 
 def _make_bucket(

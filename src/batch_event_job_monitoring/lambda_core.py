@@ -7,9 +7,9 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from hls_batch_job_monitoring.job_details import JobDetails
-from hls_batch_job_monitoring.log_store import S3RecordStore
-from hls_batch_job_monitoring.models import (
+from batch_event_job_monitoring.job_details import JobDetails
+from batch_event_job_monitoring.log_store import S3RecordStore
+from batch_event_job_monitoring.models import (
     ProcessingEventRecord,
     ProcessingState,
     RetryPolicy,

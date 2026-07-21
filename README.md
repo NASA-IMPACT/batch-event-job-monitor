@@ -1,4 +1,4 @@
-# hls-batch-job-monitoring
+# batch-event-job-monitoring
 
 Reusable AWS Batch job-monitoring components: an S3-backed job log store, a
 Lambda-based job monitor core, and CDK constructs for the supporting

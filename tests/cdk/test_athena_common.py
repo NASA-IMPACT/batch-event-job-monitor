@@ -8,7 +8,7 @@ import pytest
 from aws_cdk import App, Stack, aws_glue as glue
 from aws_cdk.assertions import Template
 
-from hls_batch_job_monitoring_cdk.athena_common import (
+from batch_event_job_monitoring_cdk.athena_common import (
     HIVE_TEXT_OUTPUT_FORMAT,
     PARQUET_SERDE,
     SYMLINK_INPUT_FORMAT,
