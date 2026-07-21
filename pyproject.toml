@@ -1,6 +1,6 @@
 [project]
 name = "batch-event-job-monitoring"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Reusable AWS Batch job logging/monitoring: S3 log store, Lambda job monitor, CDK constructs"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,8 +31,11 @@ deploy = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/batch_event_job_monitoring", "src/batch_event_job_monitoring_cdk"]
