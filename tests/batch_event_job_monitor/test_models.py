@@ -6,7 +6,6 @@ from batch_event_job_monitor.models import (
     ProcessingEventRecord,
     ProcessingState,
     RetryPolicy,
-    is_terminal,
 )
 
 
@@ -61,60 +60,60 @@ class TestRetryPolicy:
 
 
 class TestIsTerminal:
-    """Tests for is_terminal function."""
+    """Tests for ProcessingState.is_terminal."""
 
     def test_success_is_always_terminal(self) -> None:
         """SUCCESS is always terminal regardless of attempt count."""
         policy = RetryPolicy(max_attempts=3)
-        assert is_terminal(ProcessingState.SUCCESS, 1, policy)
-        assert is_terminal(ProcessingState.SUCCESS, 2, policy)
-        assert is_terminal(ProcessingState.SUCCESS, 3, policy)
+        assert ProcessingState.SUCCESS.is_terminal(1, policy)
+        assert ProcessingState.SUCCESS.is_terminal(2, policy)
+        assert ProcessingState.SUCCESS.is_terminal(3, policy)
 
     def test_failure_nonretryable_is_always_terminal(self) -> None:
         """FAILURE_NONRETRYABLE is always terminal."""
         policy = RetryPolicy(max_attempts=3)
-        assert is_terminal(ProcessingState.FAILURE_NONRETRYABLE, 1, policy)
-        assert is_terminal(ProcessingState.FAILURE_NONRETRYABLE, 2, policy)
-        assert is_terminal(ProcessingState.FAILURE_NONRETRYABLE, 3, policy)
+        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal(1, policy)
+        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal(2, policy)
+        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal(3, policy)
 
     def test_failure_retryable_not_terminal_below_max_attempts(self) -> None:
         """FAILURE_RETRYABLE is not terminal when attempt < max_attempts."""
         policy = RetryPolicy(max_attempts=3)
-        assert not is_terminal(ProcessingState.FAILURE_RETRYABLE, 1, policy)
-        assert not is_terminal(ProcessingState.FAILURE_RETRYABLE, 2, policy)
+        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(1, policy)
+        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(2, policy)
 
     def test_failure_retryable_terminal_at_max_attempts(self) -> None:
         """FAILURE_RETRYABLE is terminal when attempt >= max_attempts."""
         policy = RetryPolicy(max_attempts=3)
-        assert is_terminal(ProcessingState.FAILURE_RETRYABLE, 3, policy)
+        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(3, policy)
 
     def test_failure_retryable_terminal_above_max_attempts(self) -> None:
         """FAILURE_RETRYABLE is terminal when attempt > max_attempts."""
         policy = RetryPolicy(max_attempts=3)
-        assert is_terminal(ProcessingState.FAILURE_RETRYABLE, 4, policy)
+        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(4, policy)
 
     def test_submitted_not_terminal(self) -> None:
         """SUBMITTED is never terminal."""
         policy = RetryPolicy(max_attempts=3)
-        assert not is_terminal(ProcessingState.SUBMITTED, 1, policy)
-        assert not is_terminal(ProcessingState.SUBMITTED, 3, policy)
+        assert not ProcessingState.SUBMITTED.is_terminal(1, policy)
+        assert not ProcessingState.SUBMITTED.is_terminal(3, policy)
 
     def test_awaiting_not_terminal(self) -> None:
         """AWAITING is never terminal."""
         policy = RetryPolicy(max_attempts=3)
-        assert not is_terminal(ProcessingState.AWAITING, 1, policy)
-        assert not is_terminal(ProcessingState.AWAITING, 3, policy)
+        assert not ProcessingState.AWAITING.is_terminal(1, policy)
+        assert not ProcessingState.AWAITING.is_terminal(3, policy)
 
     def test_is_terminal_with_different_max_attempts(self) -> None:
         """Test is_terminal with different max_attempts values."""
         policy_2 = RetryPolicy(max_attempts=2)
         policy_5 = RetryPolicy(max_attempts=5)
 
-        assert not is_terminal(ProcessingState.FAILURE_RETRYABLE, 1, policy_2)
-        assert is_terminal(ProcessingState.FAILURE_RETRYABLE, 2, policy_2)
+        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(1, policy_2)
+        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(2, policy_2)
 
-        assert not is_terminal(ProcessingState.FAILURE_RETRYABLE, 4, policy_5)
-        assert is_terminal(ProcessingState.FAILURE_RETRYABLE, 5, policy_5)
+        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(4, policy_5)
+        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(5, policy_5)
 
 
 class TestProcessingEventRecord:

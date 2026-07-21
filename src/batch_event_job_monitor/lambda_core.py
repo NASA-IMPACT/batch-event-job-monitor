@@ -15,7 +15,6 @@ from batch_event_job_monitor.models import (
     ProcessingEventRecord,
     ProcessingState,
     RetryPolicy,
-    is_terminal,
 )
 
 
@@ -96,7 +95,7 @@ def monitor_job(
         context=context, new_state=new_state, old_state=old_state
     )
 
-    terminal = is_terminal(new_state, context.attempt, retry_policy)
+    terminal = new_state.is_terminal(context.attempt, retry_policy)
 
     if terminal:
         log_store.write_output_index(context=context, state=new_state)

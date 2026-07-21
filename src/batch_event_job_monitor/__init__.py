@@ -8,7 +8,6 @@ from batch_event_job_monitor.models import (
     ProcessingEventRecord,
     ProcessingState,
     RetryPolicy,
-    is_terminal,
 )
 
 try:
@@ -23,6 +22,5 @@ __all__ = [
     "ProcessingState",
     "RetryPolicy",
     "S3RecordStore",
-    "is_terminal",
     "monitor_job",
 ]

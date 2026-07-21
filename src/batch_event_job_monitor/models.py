@@ -14,6 +14,27 @@ class ProcessingState(str, enum.Enum):
     FAILURE_RETRYABLE = "FAILURE_RETRYABLE"
     FAILURE_NONRETRYABLE = "FAILURE_NONRETRYABLE"
 
+    def is_terminal(self, attempt: int, retry_policy: RetryPolicy) -> bool:
+        """Determine if this state is terminal.
+
+        Parameters
+        ----------
+        attempt : int
+            The current attempt number.
+        retry_policy : RetryPolicy
+            The retry policy configuration.
+
+        Returns
+        -------
+        bool
+            True if the state is terminal, False otherwise.
+        """
+        if self in (ProcessingState.SUCCESS, ProcessingState.FAILURE_NONRETRYABLE):
+            return True
+        if self == ProcessingState.FAILURE_RETRYABLE:
+            return attempt >= retry_policy.max_attempts
+        return False
+
 
 @dataclass(frozen=True)
 class RetryPolicy:
@@ -32,32 +53,6 @@ class JobContext:
     entity_id: str
     output_entity_id: str
     attempt: int
-
-
-def is_terminal(
-    state: ProcessingState, attempt: int, retry_policy: RetryPolicy
-) -> bool:
-    """Determine if a processing state is terminal.
-
-    Parameters
-    ----------
-    state : ProcessingState
-        The current processing state.
-    attempt : int
-        The current attempt number.
-    retry_policy : RetryPolicy
-        The retry policy configuration.
-
-    Returns
-    -------
-    bool
-        True if the state is terminal, False otherwise.
-    """
-    if state in (ProcessingState.SUCCESS, ProcessingState.FAILURE_NONRETRYABLE):
-        return True
-    if state == ProcessingState.FAILURE_RETRYABLE:
-        return attempt >= retry_policy.max_attempts
-    return False
 
 
 @dataclass
