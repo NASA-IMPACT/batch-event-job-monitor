@@ -50,9 +50,7 @@ class TestProcessingBucketInventories:
                                 "Prefix": "state/",
                                 "Enabled": True,
                                 "ScheduleFrequency": "Daily",
-                                "Destination": Match.object_like(
-                                    {"Format": "Parquet"}
-                                ),
+                                "Destination": Match.object_like({"Format": "Parquet"}),
                                 "OptionalFields": ["LastModifiedDate"],
                             }
                         )
@@ -75,9 +73,7 @@ class TestProcessingBucketInventories:
                                 "Prefix": "outputs/",
                                 "Enabled": True,
                                 "ScheduleFrequency": "Daily",
-                                "Destination": Match.object_like(
-                                    {"Format": "Parquet"}
-                                ),
+                                "Destination": Match.object_like({"Format": "Parquet"}),
                                 "OptionalFields": ["LastModifiedDate"],
                             }
                         )
@@ -94,13 +90,10 @@ class TestProcessingBucketInventories:
             r for r in resources.values() if r["Type"] == "AWS::S3::Bucket"
         ]
         [bucket] = [
-            r
-            for r in bucket_resources
-            if "InventoryConfigurations" in r["Properties"]
+            r for r in bucket_resources if "InventoryConfigurations" in r["Properties"]
         ]
         ids = {
-            config["Id"]
-            for config in bucket["Properties"]["InventoryConfigurations"]
+            config["Id"] for config in bucket["Properties"]["InventoryConfigurations"]
         }
         assert ids == {"state", "outputs"}
 
@@ -115,9 +108,7 @@ class TestProcessingBucketInventories:
                 "InventoryConfigurations": Match.array_with(
                     [
                         Match.object_like({"Id": "records", "Prefix": "records/"}),
-                        Match.object_like(
-                            {"Id": "logs", "Prefix": "logs/prefix/"}
-                        ),
+                        Match.object_like({"Id": "logs", "Prefix": "logs/prefix/"}),
                     ]
                 )
             },

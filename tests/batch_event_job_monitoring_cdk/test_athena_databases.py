@@ -20,9 +20,7 @@ from batch_event_job_monitoring_cdk.athena_state_database import AthenaStateData
 from batch_event_job_monitoring_cdk.partition_key_spec import PartitionKeySpec
 
 _PARTITION_KEYS = [
-    PartitionKeySpec(
-        "job_type", "string", "enum", enum_values=("monthly-composite",)
-    ),
+    PartitionKeySpec("job_type", "string", "enum", enum_values=("monthly-composite",)),
     PartitionKeySpec("tile_id", "string", "enum", enum_values=("12TVK", "13TVK")),
     PartitionKeySpec(
         "year_month",

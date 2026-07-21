@@ -70,7 +70,9 @@ class TestKeyConstructors:
 
 class TestAppendCanonicalEvent:
     def test_creates_new_record(self, store: S3RecordStore, s3: S3Client) -> None:
-        event = ProcessingEventRecord(state="AWAITING", timestamp="2024-01-15T00:00:00Z")
+        event = ProcessingEventRecord(
+            state="AWAITING", timestamp="2024-01-15T00:00:00Z"
+        )
         store.append_canonical_event(
             entity_id=ENTITY_ID,
             output_entity_id=OUTPUT_ENTITY_ID,
@@ -184,7 +186,11 @@ class TestStatePointer:
         assert resp.get("KeyCount", 0) == 0
 
         submitted_key = S3RecordStore.state_pointer_key(
-            ProcessingState.SUBMITTED, JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
+            ProcessingState.SUBMITTED,
+            JOB_TYPE,
+            TILE_MONTH_PARTITION,
+            ENTITY_ID,
+            ATTEMPT,
         )
         resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=submitted_key)
         assert resp.get("KeyCount", 0) == 1
@@ -200,9 +206,7 @@ class TestStatePointer:
         )
         assert written is True
 
-    def test_conditional_write_second_returns_false(
-        self, store: S3RecordStore
-    ) -> None:
+    def test_conditional_write_second_returns_false(self, store: S3RecordStore) -> None:
         written_first = store.write_state_pointer_conditional(
             job_type=JOB_TYPE,
             partition_fields=TILE_MONTH_PARTITION,

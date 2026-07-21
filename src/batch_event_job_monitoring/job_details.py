@@ -13,7 +13,9 @@ if TYPE_CHECKING:
 class JobDetails:
     """Container for parsing an AWS Batch job state change event detail."""
 
-    raw: dict[str, Any]  # the EventBridge "detail" object for an aws.batch job state change event
+    raw: dict[
+        str, Any
+    ]  # the EventBridge "detail" object for an aws.batch job state change event
 
     @classmethod
     def from_event(cls, detail: dict[str, Any]) -> JobDetails:

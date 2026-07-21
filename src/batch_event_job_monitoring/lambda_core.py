@@ -138,9 +138,7 @@ def monitor_job(
 
     if new_state is ProcessingState.FAILURE_RETRYABLE and not terminal:
         if retry_queue_url is not None:
-            sqs_client.send_message(
-                QueueUrl=retry_queue_url, MessageBody=message_body
-            )
+            sqs_client.send_message(QueueUrl=retry_queue_url, MessageBody=message_body)
     elif terminal and new_state is not ProcessingState.SUCCESS:
         if dlq_url is not None:
             sqs_client.send_message(QueueUrl=dlq_url, MessageBody=message_body)

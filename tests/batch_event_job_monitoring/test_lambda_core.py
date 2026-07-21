@@ -49,9 +49,7 @@ def _receive_all(sqs: SQSClient, queue_url: str) -> list[MessageTypeDef]:
     return resp.get("Messages", [])
 
 
-def _output_index_exists(
-    s3: S3Client, bucket: str, state: ProcessingState
-) -> bool:
+def _output_index_exists(s3: S3Client, bucket: str, state: ProcessingState) -> bool:
     key = S3RecordStore.output_index_key(
         state, JOB_TYPE, PARTITION_FIELDS, OUTPUT_ENTITY_ID
     )
@@ -196,16 +194,18 @@ class TestSuccessPath:
         success_key = S3RecordStore.state_pointer_key(
             ProcessingState.SUCCESS, JOB_TYPE, PARTITION_FIELDS, ENTITY_ID, 0
         )
-        assert s3.list_objects_v2(
-            Bucket=bucket, Prefix=success_key
-        ).get("KeyCount", 0) == 1
+        assert (
+            s3.list_objects_v2(Bucket=bucket, Prefix=success_key).get("KeyCount", 0)
+            == 1
+        )
 
         awaiting_key = S3RecordStore.state_pointer_key(
             ProcessingState.AWAITING, JOB_TYPE, PARTITION_FIELDS, ENTITY_ID, 0
         )
-        assert s3.list_objects_v2(
-            Bucket=bucket, Prefix=awaiting_key
-        ).get("KeyCount", 0) == 0
+        assert (
+            s3.list_objects_v2(Bucket=bucket, Prefix=awaiting_key).get("KeyCount", 0)
+            == 0
+        )
 
 
 class TestFailureRetryableWithAttemptsRemaining:
@@ -273,9 +273,7 @@ class TestFailureRetryableWithAttemptsRemaining:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert not _output_index_exists(
-            s3, bucket, ProcessingState.FAILURE_RETRYABLE
-        )
+        assert not _output_index_exists(s3, bucket, ProcessingState.FAILURE_RETRYABLE)
 
     def test_no_retry_queue_url_sends_nothing(
         self,
@@ -334,9 +332,7 @@ class TestFailureRetryableAttemptsExhausted:
             now=_fixed_now,
         )
         assert result is ProcessingState.FAILURE_RETRYABLE
-        assert _output_index_exists(
-            s3, bucket, ProcessingState.FAILURE_RETRYABLE
-        )
+        assert _output_index_exists(s3, bucket, ProcessingState.FAILURE_RETRYABLE)
 
         assert _receive_all(sqs, retry_queue_url) == []
         dlq_messages = _receive_all(sqs, dlq_url)
@@ -376,9 +372,7 @@ class TestFailureNonretryable:
             now=_fixed_now,
         )
         assert result is ProcessingState.FAILURE_NONRETRYABLE
-        assert _output_index_exists(
-            s3, bucket, ProcessingState.FAILURE_NONRETRYABLE
-        )
+        assert _output_index_exists(s3, bucket, ProcessingState.FAILURE_NONRETRYABLE)
 
         assert _receive_all(sqs, retry_queue_url) == []
         dlq_messages = _receive_all(sqs, dlq_url)

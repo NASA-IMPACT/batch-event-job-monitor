@@ -379,9 +379,7 @@ class S3RecordStore:
         state : ProcessingState
             The terminal state to index under.
         """
-        key = self.output_index_key(
-            state, job_type, partition_fields, output_entity_id
-        )
+        key = self.output_index_key(state, job_type, partition_fields, output_entity_id)
         self.client.put_object(Bucket=self.bucket, Key=key, Body=b"")
 
     # -------------------------------------------------------------- scanning

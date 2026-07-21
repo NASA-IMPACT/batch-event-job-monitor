@@ -47,7 +47,9 @@ class TestRetryPolicy:
     def test_retry_policy_custom_values(self) -> None:
         """Test RetryPolicy with custom values."""
         prefixes = ("Host EC2", "Custom")
-        policy = RetryPolicy(max_attempts=5, spot_interruption_status_reason_prefixes=prefixes)
+        policy = RetryPolicy(
+            max_attempts=5, spot_interruption_status_reason_prefixes=prefixes
+        )
         assert policy.max_attempts == 5
         assert policy.spot_interruption_status_reason_prefixes == prefixes
 
