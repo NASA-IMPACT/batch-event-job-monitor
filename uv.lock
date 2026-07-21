@@ -141,7 +141,7 @@ wheels = [
 ]
 
 [[package]]
-name = "batch-event-job-monitoring"
+name = "batch-event-job-monitor"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },

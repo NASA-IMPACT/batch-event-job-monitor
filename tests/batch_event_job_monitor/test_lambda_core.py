@@ -9,9 +9,9 @@ from mypy_boto3_s3 import S3Client
 from mypy_boto3_sqs import SQSClient
 from mypy_boto3_sqs.type_defs import MessageTypeDef
 
-from batch_event_job_monitoring.lambda_core import monitor_job
-from batch_event_job_monitoring.log_store import S3RecordStore
-from batch_event_job_monitoring.models import ProcessingState, RetryPolicy
+from batch_event_job_monitor.lambda_core import monitor_job
+from batch_event_job_monitor.log_store import S3RecordStore
+from batch_event_job_monitor.models import ProcessingState, RetryPolicy
 
 JOB_TYPE = "monthly-composite"
 ENTITY_ID = "12TVK_2024-06_source"

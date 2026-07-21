@@ -10,7 +10,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from batch_event_job_monitoring.models import ProcessingEventRecord, ProcessingState
+from batch_event_job_monitor.models import ProcessingEventRecord, ProcessingState
 
 logger = logging.getLogger(__name__)
 

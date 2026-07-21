@@ -1,4 +1,4 @@
-# batch-event-job-monitoring
+# batch-event-job-monitor
 
 Reusable AWS Batch job-monitoring components:
 

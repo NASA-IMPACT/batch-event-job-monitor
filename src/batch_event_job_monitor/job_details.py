@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from batch_event_job_monitoring.models import ProcessingState, RetryPolicy
+from batch_event_job_monitor.models import ProcessingState, RetryPolicy
 
 if TYPE_CHECKING:
     from mypy_boto3_batch.type_defs import JobDetailTypeDef
@@ -13,9 +13,8 @@ if TYPE_CHECKING:
 class JobDetails:
     """Container for parsing an AWS Batch job state change event detail."""
 
-    raw: dict[
-        str, Any
-    ]  # the EventBridge "detail" object for an aws.batch job state change event
+    # the EventBridge "detail" object for an aws.batch job state change event
+    raw: dict[str, Any]
 
     @classmethod
     def from_event(cls, detail: dict[str, Any]) -> JobDetails:

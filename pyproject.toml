@@ -1,5 +1,5 @@
 [project]
-name = "batch-event-job-monitoring"
+name = "batch-event-job-monitor"
 dynamic = ["version"]
 description = "Reusable AWS Batch job logging/monitoring: S3 log store, Lambda job monitor, CDK constructs"
 readme = "README.md"
@@ -38,7 +38,7 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/batch_event_job_monitoring", "src/batch_event_job_monitoring_cdk"]
+packages = ["src/batch_event_job_monitor", "src/batch_event_job_monitor_cdk"]
 
 [tool.uv]
 package = true
@@ -57,8 +57,8 @@ extend-select = ["I"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
-    "batch_event_job_monitoring",
-    "batch_event_job_monitoring_cdk",
+    "batch_event_job_monitor",
+    "batch_event_job_monitor_cdk",
 ]
 combine-as-imports = true
 

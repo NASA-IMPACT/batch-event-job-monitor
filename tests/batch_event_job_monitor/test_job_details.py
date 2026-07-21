@@ -2,8 +2,8 @@ from typing import Any
 
 import pytest
 
-from batch_event_job_monitoring.job_details import JobDetails
-from batch_event_job_monitoring.models import ProcessingState, RetryPolicy
+from batch_event_job_monitor.job_details import JobDetails
+from batch_event_job_monitor.models import ProcessingState, RetryPolicy
 
 
 def make_detail(**overrides: Any) -> dict[str, Any]:
