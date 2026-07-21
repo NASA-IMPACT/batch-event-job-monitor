@@ -61,7 +61,8 @@ def monitor_job(
     output_entity_id : str
         The output entity identifier.
     attempt : int
-        The current attempt number.
+        The current attempt number. 1-based attempt count for this job run,
+        e.g. len(detail["attempts"]) from the AWS Batch job detail.
     old_state : ProcessingState or None
         The previous state whose pointer should be removed, if any.
     retry_policy : RetryPolicy

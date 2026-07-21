@@ -38,7 +38,7 @@ _EVENTS_TYPE = (
 _COLUMNS = [
     ("entity_id", "string", "Processed entity identifier"),
     ("output_entity_id", "string", "Output entity identifier"),
-    ("attempt", "int", "Attempt number (0-indexed)"),
+    ("attempt", "int", "Attempt number (1-indexed)"),
     ("batch_job_id", "string", "AWS Batch job ID"),
     ("events", _EVENTS_TYPE, "Append-only list of state-transition events"),
     ("current_state", "string", "Most recent state"),

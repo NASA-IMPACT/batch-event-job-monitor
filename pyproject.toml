@@ -8,6 +8,12 @@ dependencies = [
     "boto3",
 ]
 
+[project.optional-dependencies]
+cdk = [
+    "aws-cdk-lib>=2.188.0",
+    "constructs>=10.4.2",
+]
+
 [dependency-groups]
 dev = [
     "aws-lambda-typing>=2.20.0",

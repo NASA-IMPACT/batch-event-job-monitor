@@ -132,7 +132,7 @@ class AthenaStateDatabase(Construct):
             glue.CfnTable.ColumnProperty(
                 name="attempt",
                 type="int",
-                comment="Attempt number (0-indexed).",
+                comment="Attempt number (1-indexed).",
             ),
             glue.CfnTable.ColumnProperty(
                 name="last_modified_date",
