@@ -53,7 +53,7 @@ testpaths = [
 line-length = 88
 
 [tool.ruff.lint]
-extend-select = ["I"]
+extend-select = ["I", "RUF"]
 
 [tool.ruff.lint.isort]
 known-first-party = [

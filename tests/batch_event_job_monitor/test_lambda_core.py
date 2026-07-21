@@ -1,5 +1,6 @@
 """Tests for monitor_job (reusable job-monitor orchestration)."""
 
+import dataclasses
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -11,13 +12,21 @@ from mypy_boto3_sqs.type_defs import MessageTypeDef
 
 from batch_event_job_monitor.lambda_core import monitor_job
 from batch_event_job_monitor.log_store import S3RecordStore
-from batch_event_job_monitor.models import ProcessingState, RetryPolicy
+from batch_event_job_monitor.models import JobContext, ProcessingState, RetryPolicy
 
 JOB_TYPE = "monthly-composite"
 ENTITY_ID = "12TVK_2024-06_source"
 OUTPUT_ENTITY_ID = "12TVK_2024-06_output"
 PARTITION_FIELDS = {"tile_id": "12TVK", "year_month": "2024-06"}
 FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+CONTEXT = JobContext(
+    job_type=JOB_TYPE,
+    partition_fields=PARTITION_FIELDS,
+    entity_id=ENTITY_ID,
+    output_entity_id=OUTPUT_ENTITY_ID,
+    attempt=0,
+)
 
 
 def make_detail(**overrides: Any) -> dict[str, Any]:
@@ -50,9 +59,7 @@ def _receive_all(sqs: SQSClient, queue_url: str) -> list[MessageTypeDef]:
 
 
 def _output_index_exists(s3: S3Client, bucket: str, state: ProcessingState) -> bool:
-    key = S3RecordStore.output_index_key(
-        state, JOB_TYPE, PARTITION_FIELDS, OUTPUT_ENTITY_ID
-    )
+    key = S3RecordStore.output_index_key(state, CONTEXT)
     resp = s3.list_objects_v2(Bucket=bucket, Prefix=key)
     return resp.get("KeyCount", 0) == 1
 
@@ -68,11 +75,7 @@ class TestSuccessPath:
         result = monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -94,11 +97,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -118,11 +117,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -145,11 +140,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=None,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -157,7 +148,7 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        key = S3RecordStore.canonical_key(JOB_TYPE, PARTITION_FIELDS, ENTITY_ID, 0)
+        key = S3RecordStore.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert record["current_state"] == "SUCCESS"
@@ -179,11 +170,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -191,16 +178,14 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        success_key = S3RecordStore.state_pointer_key(
-            ProcessingState.SUCCESS, JOB_TYPE, PARTITION_FIELDS, ENTITY_ID, 0
-        )
+        success_key = S3RecordStore.state_pointer_key(ProcessingState.SUCCESS, CONTEXT)
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=success_key).get("KeyCount", 0)
             == 1
         )
 
         awaiting_key = S3RecordStore.state_pointer_key(
-            ProcessingState.AWAITING, JOB_TYPE, PARTITION_FIELDS, ENTITY_ID, 0
+            ProcessingState.AWAITING, CONTEXT
         )
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=awaiting_key).get("KeyCount", 0)
@@ -221,11 +206,7 @@ class TestFailureRetryableWithAttemptsRemaining:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -261,11 +242,7 @@ class TestFailureRetryableWithAttemptsRemaining:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -287,11 +264,7 @@ class TestFailureRetryableWithAttemptsRemaining:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=None,
@@ -319,11 +292,7 @@ class TestFailureRetryableAttemptsExhausted:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=3,
+            context=dataclasses.replace(CONTEXT, attempt=3),
             old_state=ProcessingState.AWAITING,
             retry_policy=retry_policy,
             retry_queue_url=retry_queue_url,
@@ -359,11 +328,7 @@ class TestFailureNonretryable:
                 container={"exitCode": 1},
             ),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -395,11 +360,7 @@ class TestFailureNonretryable:
                 container={"exitCode": 1},
             ),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -425,11 +386,7 @@ class TestDefaultNow:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            job_type=JOB_TYPE,
-            partition_fields=PARTITION_FIELDS,
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            attempt=0,
+            context=CONTEXT,
             old_state=None,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
@@ -438,7 +395,7 @@ class TestDefaultNow:
         )
         after = datetime.now(timezone.utc)
 
-        key = S3RecordStore.canonical_key(JOB_TYPE, PARTITION_FIELDS, ENTITY_ID, 0)
+        key = S3RecordStore.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         timestamp = datetime.fromisoformat(record["events"][0]["timestamp"])

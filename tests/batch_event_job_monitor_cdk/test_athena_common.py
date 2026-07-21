@@ -334,12 +334,12 @@ class TestCreatePrestoView:
 
         template = Template.from_stack(stack)
         resources = template.to_json()["Resources"]
-        presto_view_resource = [
+        presto_view_resource = next(
             r
             for r in resources.values()
             if r["Type"] == "AWS::Glue::Table"
             and r["Properties"]["TableInput"]["Name"] == "test_view"
-        ][0]
+        )
         view_text = presto_view_resource["Properties"]["TableInput"]["ViewOriginalText"]
         assert view_text.startswith("/* Presto View: ")
         assert view_text.endswith(" */")

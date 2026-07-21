@@ -23,6 +23,17 @@ class RetryPolicy:
     spot_interruption_status_reason_prefixes: tuple[str, ...] = ("Host EC2",)
 
 
+@dataclass(frozen=True)
+class JobContext:
+    """Identifying and partitioning fields for a job processing event."""
+
+    job_type: str
+    partition_fields: dict[str, str]
+    entity_id: str
+    output_entity_id: str
+    attempt: int
+
+
 def is_terminal(
     state: ProcessingState, attempt: int, retry_policy: RetryPolicy
 ) -> bool:

@@ -10,7 +10,11 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from batch_event_job_monitor.models import ProcessingEventRecord, ProcessingState
+from batch_event_job_monitor.models import (
+    JobContext,
+    ProcessingEventRecord,
+    ProcessingState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,70 +42,44 @@ class S3RecordStore:
     bucket: str
     client: Any = field(default_factory=lambda: boto3.client("s3"))
 
-    # ------------------------------------------------------------------ keys
-
+    # -------------------- keys
     @staticmethod
-    def canonical_key(
-        job_type: str,
-        partition_fields: dict[str, str],
-        entity_id: str,
-        attempt: int,
-    ) -> str:
+    def canonical_key(context: JobContext) -> str:
         """Build the canonical record key.
 
         Parameters
         ----------
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        entity_id : str
-            The processed entity identifier.
-        attempt : int
-            The attempt number.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
 
         Returns
         -------
         str
             The S3 key for the canonical record object.
         """
-        partition = _render_partition(partition_fields)
+        partition = _render_partition(context.partition_fields)
         return (
-            f"records/job_type={job_type}/{partition}"
-            f"entity_id={entity_id}/{attempt:03d}.json"
+            f"records/job_type={context.job_type}/{partition}"
+            f"entity_id={context.entity_id}/{context.attempt:03d}.json"
         )
 
     @staticmethod
     def _state_prefix(
-        state: ProcessingState,
-        job_type: str,
-        partition_fields: dict[str, str],
+        state: ProcessingState, job_type: str, partition_fields: dict[str, str]
     ) -> str:
         partition = _render_partition(partition_fields)
         return f"state/state={state.name}/job_type={job_type}/{partition}"
 
     @staticmethod
-    def state_pointer_key(
-        state: ProcessingState,
-        job_type: str,
-        partition_fields: dict[str, str],
-        entity_id: str,
-        attempt: int,
-    ) -> str:
+    def state_pointer_key(state: ProcessingState, context: JobContext) -> str:
         """Build the state pointer key.
 
         Parameters
         ----------
         state : ProcessingState
             The state whose pointer key is being built.
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        entity_id : str
-            The processed entity identifier.
-        attempt : int
-            The attempt number.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
 
         Returns
         -------
@@ -109,48 +87,39 @@ class S3RecordStore:
             The S3 key for the state pointer object.
         """
         return (
-            S3RecordStore._state_prefix(state, job_type, partition_fields)
-            + f"entity_id={entity_id}/{attempt:03d}"
+            S3RecordStore._state_prefix(
+                state, context.job_type, context.partition_fields
+            )
+            + f"entity_id={context.entity_id}/{context.attempt:03d}"
         )
 
     @staticmethod
-    def output_index_key(
-        state: ProcessingState,
-        job_type: str,
-        partition_fields: dict[str, str],
-        output_entity_id: str,
-    ) -> str:
+    def output_index_key(state: ProcessingState, context: JobContext) -> str:
         """Build the output index key.
 
         Parameters
         ----------
         state : ProcessingState
             The terminal state whose output index key is being built.
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        output_entity_id : str
-            The output entity identifier.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
 
         Returns
         -------
         str
             The S3 key for the output index object.
         """
-        partition = _render_partition(partition_fields)
-        return f"outputs/state={state.name}/job_type={job_type}/{partition}{output_entity_id}"
+        partition = _render_partition(context.partition_fields)
+        return (
+            f"outputs/state={state.name}/job_type={context.job_type}/"
+            f"{partition}{context.output_entity_id}"
+        )
 
-    # -------------------------------------------------------- canonical record
-
+    # -------------------- canonical record
     def append_canonical_event(
         self,
         *,
-        entity_id: str,
-        output_entity_id: str,
-        job_type: str,
-        partition_fields: dict[str, str],
-        attempt: int,
+        context: JobContext,
         event: ProcessingEventRecord,
         batch_job_id: str | None = None,
     ) -> None:
@@ -162,22 +131,14 @@ class S3RecordStore:
 
         Parameters
         ----------
-        entity_id : str
-            The processed entity identifier.
-        output_entity_id : str
-            The output entity identifier.
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        attempt : int
-            The attempt number.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
         event : ProcessingEventRecord
             The event to append.
         batch_job_id : str or None, optional
             The AWS Batch job id associated with this attempt.
         """
-        key = self.canonical_key(job_type, partition_fields, entity_id, attempt)
+        key = self.canonical_key(context)
         record: dict[str, Any]
         try:
             resp = self.client.get_object(Bucket=self.bucket, Key=key)
@@ -186,11 +147,11 @@ class S3RecordStore:
             if exc.response["Error"]["Code"] != "NoSuchKey":
                 raise
             record = {
-                "entity_id": entity_id,
-                "output_entity_id": output_entity_id,
-                "job_type": job_type,
-                "partition_fields": partition_fields,
-                "attempt": attempt,
+                "entity_id": context.entity_id,
+                "output_entity_id": context.output_entity_id,
+                "job_type": context.job_type,
+                "partition_fields": context.partition_fields,
+                "attempt": context.attempt,
                 "batch_job_id": batch_job_id,
                 "events": [],
                 "current_state": event.state,
@@ -206,48 +167,33 @@ class S3RecordStore:
             ContentType="application/json",
         )
 
-    # ---------------------------------------------------------- state pointer
-
+    # -------------------- state pointer
     def write_state_pointer(
         self,
         *,
-        job_type: str,
-        partition_fields: dict[str, str],
-        entity_id: str,
-        attempt: int,
+        context: JobContext,
         new_state: ProcessingState,
         old_state: ProcessingState | None,
-        output_entity_id: str,
     ) -> None:
         """Write new state pointer and delete the old one.
 
         Parameters
         ----------
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        entity_id : str
-            The processed entity identifier.
-        attempt : int
-            The attempt number.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
         new_state : ProcessingState
             The state to write a pointer for.
         old_state : ProcessingState or None
             The previous state whose pointer should be deleted, if any.
-        output_entity_id : str
-            The output entity identifier.
         """
         body = json.dumps(
             {
-                "entity_id": entity_id,
-                "output_entity_id": output_entity_id,
-                "attempt": attempt,
+                "entity_id": context.entity_id,
+                "output_entity_id": context.output_entity_id,
+                "attempt": context.attempt,
             }
         ).encode()
-        new_key = self.state_pointer_key(
-            new_state, job_type, partition_fields, entity_id, attempt
-        )
+        new_key = self.state_pointer_key(new_state, context)
         self.client.put_object(
             Bucket=self.bucket,
             Key=new_key,
@@ -255,9 +201,7 @@ class S3RecordStore:
             ContentType="application/json",
         )
         if old_state is not None:
-            old_key = self.state_pointer_key(
-                old_state, job_type, partition_fields, entity_id, attempt
-            )
+            old_key = self.state_pointer_key(old_state, context)
             try:
                 self.client.delete_object(Bucket=self.bucket, Key=old_key)
             except ClientError:
@@ -266,12 +210,8 @@ class S3RecordStore:
     def write_state_pointer_conditional(
         self,
         *,
-        job_type: str,
-        partition_fields: dict[str, str],
-        entity_id: str,
-        attempt: int,
+        context: JobContext,
         state: ProcessingState,
-        output_entity_id: str,
     ) -> bool:
         """Write state pointer only if it does not already exist.
 
@@ -281,18 +221,10 @@ class S3RecordStore:
 
         Parameters
         ----------
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        entity_id : str
-            The processed entity identifier.
-        attempt : int
-            The attempt number.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
         state : ProcessingState
             The state to write a pointer for.
-        output_entity_id : str
-            The output entity identifier.
 
         Returns
         -------
@@ -301,14 +233,12 @@ class S3RecordStore:
         """
         body = json.dumps(
             {
-                "entity_id": entity_id,
-                "output_entity_id": output_entity_id,
-                "attempt": attempt,
+                "entity_id": context.entity_id,
+                "output_entity_id": context.output_entity_id,
+                "attempt": context.attempt,
             }
         ).encode()
-        key = self.state_pointer_key(
-            state, job_type, partition_fields, entity_id, attempt
-        )
+        key = self.state_pointer_key(state, context)
         try:
             self.client.put_object(
                 Bucket=self.bucket,
@@ -327,63 +257,44 @@ class S3RecordStore:
     def delete_state_pointer(
         self,
         *,
-        job_type: str,
-        partition_fields: dict[str, str],
-        entity_id: str,
-        attempt: int,
+        context: JobContext,
         state: ProcessingState,
     ) -> None:
         """Delete a state pointer object.
 
         Parameters
         ----------
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        entity_id : str
-            The processed entity identifier.
-        attempt : int
-            The attempt number.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
         state : ProcessingState
             The state whose pointer should be deleted.
         """
-        key = self.state_pointer_key(
-            state, job_type, partition_fields, entity_id, attempt
-        )
+        key = self.state_pointer_key(state, context)
         try:
             self.client.delete_object(Bucket=self.bucket, Key=key)
         except ClientError:
             logger.warning("Failed to delete state pointer %s", key)
 
-    # ---------------------------------------------------------- output index
-
+    # -------------------- output index
     def write_output_index(
         self,
         *,
-        job_type: str,
-        partition_fields: dict[str, str],
-        output_entity_id: str,
+        context: JobContext,
         state: ProcessingState,
     ) -> None:
         """Write an empty output index entry for a terminal state.
 
         Parameters
         ----------
-        job_type : str
-            The job type.
-        partition_fields : dict[str, str]
-            Ordered partition key/value pairs.
-        output_entity_id : str
-            The output entity identifier.
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
         state : ProcessingState
             The terminal state to index under.
         """
-        key = self.output_index_key(state, job_type, partition_fields, output_entity_id)
+        key = self.output_index_key(state, context)
         self.client.put_object(Bucket=self.bucket, Key=key, Body=b"")
 
-    # -------------------------------------------------------------- scanning
-
+    # -------------------- scanning
     def list_by_state(
         self,
         *,

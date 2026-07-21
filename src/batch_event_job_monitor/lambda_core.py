@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from typing import Any
 from batch_event_job_monitor.job_details import JobDetails
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
+    JobContext,
     ProcessingEventRecord,
     ProcessingState,
     RetryPolicy,
@@ -25,11 +27,7 @@ def monitor_job(
     *,
     detail: dict[str, Any],
     log_store: S3RecordStore,
-    job_type: str,
-    partition_fields: dict[str, str],
-    entity_id: str,
-    output_entity_id: str,
-    attempt: int,
+    context: JobContext,
     old_state: ProcessingState | None,
     retry_policy: RetryPolicy,
     retry_queue_url: str | None,
@@ -52,16 +50,9 @@ def monitor_job(
     log_store : S3RecordStore
         The log store used to record the canonical event, state pointer,
         and output index.
-    job_type : str
-        The job type.
-    partition_fields : dict[str, str]
-        Ordered partition key/value pairs.
-    entity_id : str
-        The processed entity identifier.
-    output_entity_id : str
-        The output entity identifier.
-    attempt : int
-        The current attempt number. 1-based attempt count for this job run,
+    context : JobContext
+        Identifying and partitioning fields for this job processing event.
+        `context.attempt` is the 1-based attempt count for this job run,
         e.g. len(detail["attempts"]) from the AWS Batch job detail.
     old_state : ProcessingState or None
         The previous state whose pointer should be removed, if any.
@@ -91,11 +82,7 @@ def monitor_job(
     new_state = job.classify(retry_policy)
 
     log_store.append_canonical_event(
-        entity_id=entity_id,
-        output_entity_id=output_entity_id,
-        job_type=job_type,
-        partition_fields=partition_fields,
-        attempt=attempt,
+        context=context,
         event=ProcessingEventRecord(
             state=new_state.value,
             timestamp=current_time().isoformat(),
@@ -106,32 +93,17 @@ def monitor_job(
     )
 
     log_store.write_state_pointer(
-        job_type=job_type,
-        partition_fields=partition_fields,
-        entity_id=entity_id,
-        attempt=attempt,
-        new_state=new_state,
-        old_state=old_state,
-        output_entity_id=output_entity_id,
+        context=context, new_state=new_state, old_state=old_state
     )
 
-    terminal = is_terminal(new_state, attempt, retry_policy)
+    terminal = is_terminal(new_state, context.attempt, retry_policy)
 
     if terminal:
-        log_store.write_output_index(
-            job_type=job_type,
-            partition_fields=partition_fields,
-            output_entity_id=output_entity_id,
-            state=new_state,
-        )
+        log_store.write_output_index(context=context, state=new_state)
 
     message_body = json.dumps(
         {
-            "job_type": job_type,
-            "partition_fields": partition_fields,
-            "entity_id": entity_id,
-            "output_entity_id": output_entity_id,
-            "attempt": attempt,
+            **dataclasses.asdict(context),
             "batch_job_id": job.job_id,
         }
     )

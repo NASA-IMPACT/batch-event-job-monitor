@@ -6,7 +6,11 @@ import pytest
 from mypy_boto3_s3 import S3Client
 
 from batch_event_job_monitor.log_store import S3RecordStore
-from batch_event_job_monitor.models import ProcessingEventRecord, ProcessingState
+from batch_event_job_monitor.models import (
+    JobContext,
+    ProcessingEventRecord,
+    ProcessingState,
+)
 
 JOB_TYPE = "monthly-composite"
 ENTITY_ID = "12TVK_2024-06_source"
@@ -20,6 +24,18 @@ ACQ_DATE_PARTITION = {"acquisition_date": "2024-01-15"}
 TILE_MONTH_PARTITION = {"tile_id": "12TVK", "year_month": "2024-06"}
 
 
+def make_context(**overrides: object) -> JobContext:
+    defaults: dict[str, object] = {
+        "job_type": JOB_TYPE,
+        "partition_fields": TILE_MONTH_PARTITION,
+        "entity_id": ENTITY_ID,
+        "output_entity_id": OUTPUT_ENTITY_ID,
+        "attempt": ATTEMPT,
+    }
+    defaults.update(overrides)
+    return JobContext(**defaults)  # type: ignore[arg-type]
+
+
 @pytest.fixture
 def store(bucket: str) -> S3RecordStore:
     return S3RecordStore(bucket=bucket)
@@ -31,9 +47,8 @@ class TestKeyConstructors:
         [ACQ_DATE_PARTITION, TILE_MONTH_PARTITION],
     )
     def test_canonical_key(self, partition_fields: dict[str, str]) -> None:
-        key = S3RecordStore.canonical_key(
-            JOB_TYPE, partition_fields, ENTITY_ID, ATTEMPT
-        )
+        context = make_context(partition_fields=partition_fields)
+        key = S3RecordStore.canonical_key(context)
         partition = "".join(f"{k}={v}/" for k, v in partition_fields.items())
         assert key == (
             f"records/job_type={JOB_TYPE}/{partition}"
@@ -45,9 +60,8 @@ class TestKeyConstructors:
         [ACQ_DATE_PARTITION, TILE_MONTH_PARTITION],
     )
     def test_state_pointer_key(self, partition_fields: dict[str, str]) -> None:
-        key = S3RecordStore.state_pointer_key(
-            ProcessingState.AWAITING, JOB_TYPE, partition_fields, ENTITY_ID, ATTEMPT
-        )
+        context = make_context(partition_fields=partition_fields)
+        key = S3RecordStore.state_pointer_key(ProcessingState.AWAITING, context)
         partition = "".join(f"{k}={v}/" for k, v in partition_fields.items())
         assert key == (
             f"state/state=AWAITING/job_type={JOB_TYPE}/{partition}"
@@ -59,9 +73,8 @@ class TestKeyConstructors:
         [ACQ_DATE_PARTITION, TILE_MONTH_PARTITION],
     )
     def test_output_index_key(self, partition_fields: dict[str, str]) -> None:
-        key = S3RecordStore.output_index_key(
-            ProcessingState.SUCCESS, JOB_TYPE, partition_fields, OUTPUT_ENTITY_ID
-        )
+        context = make_context(partition_fields=partition_fields)
+        key = S3RecordStore.output_index_key(ProcessingState.SUCCESS, context)
         partition = "".join(f"{k}={v}/" for k, v in partition_fields.items())
         assert key == (
             f"outputs/state=SUCCESS/job_type={JOB_TYPE}/{partition}{OUTPUT_ENTITY_ID}"
@@ -70,20 +83,12 @@ class TestKeyConstructors:
 
 class TestAppendCanonicalEvent:
     def test_creates_new_record(self, store: S3RecordStore, s3: S3Client) -> None:
+        context = make_context()
         event = ProcessingEventRecord(
             state="AWAITING", timestamp="2024-01-15T00:00:00Z"
         )
-        store.append_canonical_event(
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            attempt=ATTEMPT,
-            event=event,
-        )
-        key = S3RecordStore.canonical_key(
-            JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
-        )
+        store.append_canonical_event(context=context, event=event)
+        key = S3RecordStore.canonical_key(context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert record["entity_id"] == ENTITY_ID
@@ -97,42 +102,32 @@ class TestAppendCanonicalEvent:
     def test_appends_to_existing_record(
         self, store: S3RecordStore, s3: S3Client
     ) -> None:
+        context = make_context()
         transitions = [
             ("AWAITING", "2024-01-15T00:00:00Z"),
             ("SUBMITTED", "2024-01-16T00:00:00Z"),
         ]
         for state_name, timestamp in transitions:
             store.append_canonical_event(
-                entity_id=ENTITY_ID,
-                output_entity_id=OUTPUT_ENTITY_ID,
-                job_type=JOB_TYPE,
-                partition_fields=TILE_MONTH_PARTITION,
-                attempt=ATTEMPT,
+                context=context,
                 event=ProcessingEventRecord(state=state_name, timestamp=timestamp),
             )
-        key = S3RecordStore.canonical_key(
-            JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
-        )
+        key = S3RecordStore.canonical_key(context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert len(record["events"]) == 2
         assert record["current_state"] == "SUBMITTED"
 
     def test_stores_batch_job_id(self, store: S3RecordStore, s3: S3Client) -> None:
+        context = make_context()
         store.append_canonical_event(
-            entity_id=ENTITY_ID,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            attempt=ATTEMPT,
+            context=context,
             event=ProcessingEventRecord(
                 state="SUBMITTED", timestamp="2024-01-15T00:00:00Z"
             ),
             batch_job_id="batch-job-123",
         )
-        key = S3RecordStore.canonical_key(
-            JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
-        )
+        key = S3RecordStore.canonical_key(context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert record["batch_job_id"] == "batch-job-123"
@@ -140,18 +135,13 @@ class TestAppendCanonicalEvent:
 
 class TestStatePointer:
     def test_write_and_read_pointer(self, store: S3RecordStore, s3: S3Client) -> None:
+        context = make_context()
         store.write_state_pointer(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
+            context=context,
             new_state=ProcessingState.AWAITING,
             old_state=None,
-            output_entity_id=OUTPUT_ENTITY_ID,
         )
-        key = S3RecordStore.state_pointer_key(
-            ProcessingState.AWAITING, JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
-        )
+        key = S3RecordStore.state_pointer_key(ProcessingState.AWAITING, context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         body = json.loads(resp["Body"].read())
         assert body["entity_id"] == ENTITY_ID
@@ -161,106 +151,64 @@ class TestStatePointer:
     def test_transition_deletes_old_pointer(
         self, store: S3RecordStore, s3: S3Client
     ) -> None:
+        context = make_context()
         store.write_state_pointer(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
+            context=context,
             new_state=ProcessingState.AWAITING,
             old_state=None,
-            output_entity_id=OUTPUT_ENTITY_ID,
         )
         store.write_state_pointer(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
+            context=context,
             new_state=ProcessingState.SUBMITTED,
             old_state=ProcessingState.AWAITING,
-            output_entity_id=OUTPUT_ENTITY_ID,
         )
         awaiting_key = S3RecordStore.state_pointer_key(
-            ProcessingState.AWAITING, JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
+            ProcessingState.AWAITING, context
         )
         resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=awaiting_key)
         assert resp.get("KeyCount", 0) == 0
 
         submitted_key = S3RecordStore.state_pointer_key(
-            ProcessingState.SUBMITTED,
-            JOB_TYPE,
-            TILE_MONTH_PARTITION,
-            ENTITY_ID,
-            ATTEMPT,
+            ProcessingState.SUBMITTED, context
         )
         resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=submitted_key)
         assert resp.get("KeyCount", 0) == 1
 
     def test_conditional_write_first_succeeds(self, store: S3RecordStore) -> None:
         written = store.write_state_pointer_conditional(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
-            state=ProcessingState.SUBMITTED,
-            output_entity_id=OUTPUT_ENTITY_ID,
+            context=make_context(), state=ProcessingState.SUBMITTED
         )
         assert written is True
 
     def test_conditional_write_second_returns_false(self, store: S3RecordStore) -> None:
+        context = make_context()
         written_first = store.write_state_pointer_conditional(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
-            state=ProcessingState.SUBMITTED,
-            output_entity_id=OUTPUT_ENTITY_ID,
+            context=context, state=ProcessingState.SUBMITTED
         )
         written_again = store.write_state_pointer_conditional(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
-            state=ProcessingState.SUBMITTED,
-            output_entity_id=OUTPUT_ENTITY_ID,
+            context=context, state=ProcessingState.SUBMITTED
         )
         assert written_first is True
         assert written_again is False
 
     def test_delete_state_pointer(self, store: S3RecordStore, s3: S3Client) -> None:
+        context = make_context()
         store.write_state_pointer(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
+            context=context,
             new_state=ProcessingState.AWAITING,
             old_state=None,
-            output_entity_id=OUTPUT_ENTITY_ID,
         )
-        store.delete_state_pointer(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=ATTEMPT,
-            state=ProcessingState.AWAITING,
-        )
-        key = S3RecordStore.state_pointer_key(
-            ProcessingState.AWAITING, JOB_TYPE, TILE_MONTH_PARTITION, ENTITY_ID, ATTEMPT
-        )
+        store.delete_state_pointer(context=context, state=ProcessingState.AWAITING)
+        key = S3RecordStore.state_pointer_key(ProcessingState.AWAITING, context)
         resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=key)
         assert resp.get("KeyCount", 0) == 0
 
 
 class TestOutputIndex:
     def test_write_output_index(self, store: S3RecordStore, s3: S3Client) -> None:
-        store.write_output_index(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            output_entity_id=OUTPUT_ENTITY_ID,
-            state=ProcessingState.SUCCESS,
-        )
-        key = S3RecordStore.output_index_key(
-            ProcessingState.SUCCESS, JOB_TYPE, TILE_MONTH_PARTITION, OUTPUT_ENTITY_ID
-        )
+        context = make_context()
+        store.write_output_index(context=context, state=ProcessingState.SUCCESS)
+        key = S3RecordStore.output_index_key(ProcessingState.SUCCESS, context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         assert resp["Body"].read() == b""
 
@@ -277,13 +225,9 @@ class TestListByState:
     def test_returns_pointers_for_state(self, store: S3RecordStore) -> None:
         for i, entity in enumerate(["entity-one", "entity-two"]):
             store.write_state_pointer(
-                job_type=JOB_TYPE,
-                partition_fields=TILE_MONTH_PARTITION,
-                entity_id=entity,
-                attempt=0,
+                context=make_context(entity_id=entity, output_entity_id=f"output-{i}"),
                 new_state=ProcessingState.AWAITING,
                 old_state=None,
-                output_entity_id=f"output-{i}",
             )
 
         results = store.list_by_state(
@@ -297,13 +241,9 @@ class TestListByState:
 
     def test_ignores_other_states(self, store: S3RecordStore) -> None:
         store.write_state_pointer(
-            job_type=JOB_TYPE,
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=0,
+            context=make_context(),
             new_state=ProcessingState.SUBMITTED,
             old_state=None,
-            output_entity_id=OUTPUT_ENTITY_ID,
         )
         results = store.list_by_state(
             job_type=JOB_TYPE,
@@ -314,13 +254,9 @@ class TestListByState:
 
     def test_ignores_other_job_types(self, store: S3RecordStore) -> None:
         store.write_state_pointer(
-            job_type="other-job-type",
-            partition_fields=TILE_MONTH_PARTITION,
-            entity_id=ENTITY_ID,
-            attempt=0,
+            context=make_context(job_type="other-job-type"),
             new_state=ProcessingState.AWAITING,
             old_state=None,
-            output_entity_id=OUTPUT_ENTITY_ID,
         )
         results = store.list_by_state(
             job_type=JOB_TYPE,
