@@ -181,7 +181,7 @@ class TestAthenaRecordsDatabase:
                             "Columns": Match.array_with(
                                 [
                                     Match.object_like(
-                                        {"Name": "entity_id", "Type": "string"}
+                                        {"Name": "input_entity_id", "Type": "string"}
                                     ),
                                     Match.object_like(
                                         {
@@ -242,7 +242,7 @@ class TestAthenaStateDatabase:
                             {"Name": "job_type", "Type": "string"},
                             {"Name": "tile_id", "Type": "string"},
                             {"Name": "year_month", "Type": "string"},
-                            {"Name": "entity_id", "Type": "string"},
+                            {"Name": "input_entity_id", "Type": "string"},
                             {"Name": "attempt", "Type": "int"},
                             {"Name": "last_modified_date", "Type": "timestamp"},
                             {"Name": "key", "Type": "string"},
@@ -258,7 +258,7 @@ class TestAthenaStateDatabase:
         sql = _decoded_view_sql(template, "state")
         for key in ("job_type", "tile_id", "year_month"):
             assert f"/{key}=([^/]+)/" in sql
-        assert "/entity_id=([^/]+)/" in sql
+        assert "/input_entity_id=([^/]+)/" in sql
         assert "/([0-9]{3})$" in sql
 
 

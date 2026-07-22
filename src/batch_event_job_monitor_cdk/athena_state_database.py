@@ -5,7 +5,7 @@ the processing bucket, plus a view that parses each key into structured
 columns.
 
 Key schema:
-  ``state/state={STATE}/job_type={job_type}/{partition_fields...}/entity_id={entity_id}/{attempt:03d}``
+  ``state/state={STATE}/job_type={job_type}/{partition_fields...}/input_entity_id={input_entity_id}/{attempt:03d}``
 
 The inventory snapshot (daily Parquet) is cheap to query and supports
 reconciliation queries such as:
@@ -125,7 +125,7 @@ class AthenaStateDatabase(Construct):
                 for key in partition_keys
             ),
             glue.CfnTable.ColumnProperty(
-                name="entity_id",
+                name="input_entity_id",
                 type="string",
                 comment="Processed entity identifier.",
             ),
@@ -153,7 +153,7 @@ class AthenaStateDatabase(Construct):
         SELECT
             regexp_extract(key, '/state=([^/]+)/', 1) AS state,
             {partition_columns},
-            regexp_extract(key, '/entity_id=([^/]+)/', 1) AS entity_id,
+            regexp_extract(key, '/input_entity_id=([^/]+)/', 1) AS input_entity_id,
             CAST(regexp_extract(key, '/([0-9]{{3}})$', 1) AS INT) AS attempt,
             last_modified_date,
             key

@@ -13,7 +13,7 @@ from batch_event_job_monitor.models import (
 )
 
 JOB_TYPE = "monthly-composite"
-ENTITY_ID = "12TVK_2024-06_source"
+INPUT_ENTITY_ID = "12TVK_2024-06_source"
 OUTPUT_ENTITY_ID = "12TVK_2024-06_output"
 ATTEMPT = 0
 
@@ -28,7 +28,7 @@ def make_context(**overrides: object) -> JobContext:
     defaults: dict[str, object] = {
         "job_type": JOB_TYPE,
         "partition_fields": TILE_MONTH_PARTITION,
-        "entity_id": ENTITY_ID,
+        "input_entity_id": INPUT_ENTITY_ID,
         "output_entity_id": OUTPUT_ENTITY_ID,
         "attempt": ATTEMPT,
     }
@@ -52,7 +52,7 @@ class TestKeyConstructors:
         partition = "".join(f"{k}={v}/" for k, v in partition_fields.items())
         assert key == (
             f"records/job_type={JOB_TYPE}/{partition}"
-            f"entity_id={ENTITY_ID}/{ATTEMPT:03d}.json"
+            f"input_entity_id={INPUT_ENTITY_ID}/{ATTEMPT:03d}.json"
         )
 
     @pytest.mark.parametrize(
@@ -65,7 +65,7 @@ class TestKeyConstructors:
         partition = "".join(f"{k}={v}/" for k, v in partition_fields.items())
         assert key == (
             f"state/state=AWAITING/job_type={JOB_TYPE}/{partition}"
-            f"entity_id={ENTITY_ID}/{ATTEMPT:03d}"
+            f"input_entity_id={INPUT_ENTITY_ID}/{ATTEMPT:03d}"
         )
 
     @pytest.mark.parametrize(
@@ -91,7 +91,7 @@ class TestAppendCanonicalEvent:
         key = S3RecordStore.canonical_key(context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         record = json.loads(resp["Body"].read())
-        assert record["entity_id"] == ENTITY_ID
+        assert record["input_entity_id"] == INPUT_ENTITY_ID
         assert record["output_entity_id"] == OUTPUT_ENTITY_ID
         assert record["job_type"] == JOB_TYPE
         assert record["partition_fields"] == TILE_MONTH_PARTITION
@@ -144,7 +144,7 @@ class TestStatePointer:
         key = S3RecordStore.state_pointer_key(ProcessingState.AWAITING, context)
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         body = json.loads(resp["Body"].read())
-        assert body["entity_id"] == ENTITY_ID
+        assert body["input_entity_id"] == INPUT_ENTITY_ID
         assert body["output_entity_id"] == OUTPUT_ENTITY_ID
         assert body["attempt"] == ATTEMPT
 
@@ -212,6 +212,27 @@ class TestOutputIndex:
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         assert resp["Body"].read() == b""
 
+    def test_write_output_index_with_label_uses_label_in_key(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        store.write_output_index(
+            context=context, state=ProcessingState.FAILURE_NONRETRYABLE, label="CLOUDY"
+        )
+        labeled_key = S3RecordStore.output_index_key(
+            ProcessingState.FAILURE_NONRETRYABLE, context, label="CLOUDY"
+        )
+        assert "state=CLOUDY/" in labeled_key
+        resp = s3.get_object(Bucket=store.bucket, Key=labeled_key)
+        assert resp["Body"].read() == b""
+
+    def test_output_index_key_without_label_uses_state_name(self) -> None:
+        context = make_context()
+        key = S3RecordStore.output_index_key(
+            ProcessingState.FAILURE_NONRETRYABLE, context
+        )
+        assert "state=FAILURE_NONRETRYABLE/" in key
+
 
 class TestListByState:
     def test_empty_when_no_pointers(self, store: S3RecordStore) -> None:
@@ -225,7 +246,9 @@ class TestListByState:
     def test_returns_pointers_for_state(self, store: S3RecordStore) -> None:
         for i, entity in enumerate(["entity-one", "entity-two"]):
             store.write_state_pointer(
-                context=make_context(entity_id=entity, output_entity_id=f"output-{i}"),
+                context=make_context(
+                    input_entity_id=entity, output_entity_id=f"output-{i}"
+                ),
                 new_state=ProcessingState.AWAITING,
                 old_state=None,
             )
@@ -236,7 +259,7 @@ class TestListByState:
             partition_fields=TILE_MONTH_PARTITION,
         )
         assert len(results) == 2
-        entity_ids = {r["entity_id"] for r in results}
+        entity_ids = {r["input_entity_id"] for r in results}
         assert entity_ids == {"entity-one", "entity-two"}
 
     def test_ignores_other_states(self, store: S3RecordStore) -> None:
@@ -264,3 +287,149 @@ class TestListByState:
             partition_fields=TILE_MONTH_PARTITION,
         )
         assert results == []
+
+
+class TestFindStatePointer:
+    def test_no_pointer_returns_none(self, store: S3RecordStore) -> None:
+        assert store.find_state_pointer(context=make_context()) is None
+
+    def test_returns_recorded_state(self, store: S3RecordStore) -> None:
+        context = make_context()
+        store.write_state_pointer(
+            context=context, new_state=ProcessingState.SUBMITTED, old_state=None
+        )
+        assert store.find_state_pointer(context=context) is ProcessingState.SUBMITTED
+
+    def test_scoped_to_exact_attempt(self, store: S3RecordStore) -> None:
+        store.write_state_pointer(
+            context=make_context(attempt=1),
+            new_state=ProcessingState.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        assert store.find_state_pointer(context=make_context(attempt=2)) is None
+
+    def test_multiple_pointers_returns_highest_rank(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        store.write_state_pointer(
+            context=context, new_state=ProcessingState.SUBMITTED, old_state=None
+        )
+        # Simulate a stale leftover pointer (e.g. a previously swallowed
+        # delete_object failure) by writing a second state pointer directly
+        # rather than via write_state_pointer, which would delete the first.
+        key = S3RecordStore.state_pointer_key(ProcessingState.SUCCESS, context)
+        s3.put_object(Bucket=store.bucket, Key=key, Body=b"{}")
+        assert store.find_state_pointer(context=context) is ProcessingState.SUCCESS
+
+
+class TestFindActivePointer:
+    def test_no_active_pointer_returns_none(self, store: S3RecordStore) -> None:
+        result = store.find_active_pointer(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result is None
+
+    def test_returns_state_and_attempt(self, store: S3RecordStore) -> None:
+        store.write_state_pointer(
+            context=make_context(attempt=2),
+            new_state=ProcessingState.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        result = store.find_active_pointer(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result == (ProcessingState.FAILURE_RETRYABLE, 2)
+
+    def test_scoped_to_entity(self, store: S3RecordStore) -> None:
+        store.write_state_pointer(
+            context=make_context(input_entity_id="other-entity"),
+            new_state=ProcessingState.AWAITING,
+            old_state=None,
+        )
+        result = store.find_active_pointer(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result is None
+
+    def test_multiple_hits_returns_highest_rank_then_attempt(
+        self, store: S3RecordStore
+    ) -> None:
+        store.write_state_pointer(
+            context=make_context(attempt=1),
+            new_state=ProcessingState.AWAITING,
+            old_state=None,
+        )
+        store.write_state_pointer(
+            context=make_context(attempt=2),
+            new_state=ProcessingState.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        result = store.find_active_pointer(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result == (ProcessingState.FAILURE_RETRYABLE, 2)
+
+
+class TestNextAttempt:
+    def test_no_active_pointer_returns_one(self, store: S3RecordStore) -> None:
+        result = store.next_attempt(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result == 1
+
+    def test_active_pointer_returns_next(self, store: S3RecordStore) -> None:
+        store.write_state_pointer(
+            context=make_context(attempt=2),
+            new_state=ProcessingState.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        result = store.next_attempt(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result == 3
+
+
+class TestWriteStatePointerCrossAttempt:
+    def test_old_attempt_deletes_prior_attempt_pointer(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        old_context = make_context(attempt=1)
+        store.write_state_pointer(
+            context=old_context,
+            new_state=ProcessingState.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        new_context = make_context(attempt=2)
+        store.write_state_pointer(
+            context=new_context,
+            new_state=ProcessingState.SUBMITTED,
+            old_state=ProcessingState.FAILURE_RETRYABLE,
+            old_attempt=1,
+        )
+        old_key = S3RecordStore.state_pointer_key(
+            ProcessingState.FAILURE_RETRYABLE, old_context
+        )
+        assert (
+            s3.list_objects_v2(Bucket=store.bucket, Prefix=old_key).get("KeyCount", 0)
+            == 0
+        )
+        new_key = S3RecordStore.state_pointer_key(
+            ProcessingState.SUBMITTED, new_context
+        )
+        assert (
+            s3.list_objects_v2(Bucket=store.bucket, Prefix=new_key).get("KeyCount", 0)
+            == 1
+        )

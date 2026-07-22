@@ -12,10 +12,15 @@ from mypy_boto3_sqs.type_defs import MessageTypeDef
 
 from batch_event_job_monitor.lambda_core import monitor_job
 from batch_event_job_monitor.log_store import S3RecordStore
-from batch_event_job_monitor.models import JobContext, ProcessingState, RetryPolicy
+from batch_event_job_monitor.models import (
+    ExitCodeOutcomesBuilder,
+    JobContext,
+    ProcessingState,
+    RetryPolicy,
+)
 
 JOB_TYPE = "monthly-composite"
-ENTITY_ID = "12TVK_2024-06_source"
+INPUT_ENTITY_ID = "12TVK_2024-06_source"
 OUTPUT_ENTITY_ID = "12TVK_2024-06_output"
 PARTITION_FIELDS = {"tile_id": "12TVK", "year_month": "2024-06"}
 FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -23,7 +28,7 @@ FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
 CONTEXT = JobContext(
     job_type=JOB_TYPE,
     partition_fields=PARTITION_FIELDS,
-    entity_id=ENTITY_ID,
+    input_entity_id=INPUT_ENTITY_ID,
     output_entity_id=OUTPUT_ENTITY_ID,
     attempt=0,
 )
@@ -51,6 +56,12 @@ def _fixed_now() -> datetime:
     return FIXED_NOW
 
 
+def _seed_awaiting(store: S3RecordStore, context: JobContext = CONTEXT) -> None:
+    store.write_state_pointer(
+        context=context, new_state=ProcessingState.AWAITING, old_state=None
+    )
+
+
 def _receive_all(sqs: SQSClient, queue_url: str) -> list[MessageTypeDef]:
     resp = sqs.receive_message(
         QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=0
@@ -72,11 +83,11 @@ class TestSuccessPath:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         result = monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -94,11 +105,11 @@ class TestSuccessPath:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -114,11 +125,11 @@ class TestSuccessPath:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -141,7 +152,6 @@ class TestSuccessPath:
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
             context=CONTEXT,
-            old_state=None,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -167,11 +177,11 @@ class TestSuccessPath:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -201,13 +211,13 @@ class TestFailureRetryableWithAttemptsRemaining:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         result = monitor_job(
             detail=make_detail(
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -221,7 +231,7 @@ class TestFailureRetryableWithAttemptsRemaining:
         body = json.loads(retry_messages[0]["Body"])
         assert body["job_type"] == JOB_TYPE
         assert body["partition_fields"] == PARTITION_FIELDS
-        assert body["entity_id"] == ENTITY_ID
+        assert body["input_entity_id"] == INPUT_ENTITY_ID
         assert body["output_entity_id"] == OUTPUT_ENTITY_ID
         assert body["attempt"] == 0
         assert body["batch_job_id"] == "batch-job-123"
@@ -237,13 +247,13 @@ class TestFailureRetryableWithAttemptsRemaining:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         monitor_job(
             detail=make_detail(
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -259,13 +269,13 @@ class TestFailureRetryableWithAttemptsRemaining:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         monitor_job(
             detail=make_detail(
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=None,
             dlq_url=dlq_url,
@@ -286,14 +296,15 @@ class TestFailureRetryableAttemptsExhausted:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        context = dataclasses.replace(CONTEXT, attempt=3)
+        _seed_awaiting(store, context)
         retry_policy = RetryPolicy(max_attempts=3)
         result = monitor_job(
             detail=make_detail(
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            context=dataclasses.replace(CONTEXT, attempt=3),
-            old_state=ProcessingState.AWAITING,
+            context=context,
             retry_policy=retry_policy,
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -308,7 +319,7 @@ class TestFailureRetryableAttemptsExhausted:
         assert len(dlq_messages) == 1
         body = json.loads(dlq_messages[0]["Body"])
         assert body["attempt"] == 3
-        assert body["entity_id"] == ENTITY_ID
+        assert body["input_entity_id"] == INPUT_ENTITY_ID
 
 
 class TestFailureNonretryable:
@@ -321,6 +332,7 @@ class TestFailureNonretryable:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         result = monitor_job(
             detail=make_detail(
                 status="FAILED",
@@ -329,7 +341,6 @@ class TestFailureNonretryable:
             ),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -343,7 +354,7 @@ class TestFailureNonretryable:
         dlq_messages = _receive_all(sqs, dlq_url)
         assert len(dlq_messages) == 1
         body = json.loads(dlq_messages[0]["Body"])
-        assert body["entity_id"] == ENTITY_ID
+        assert body["input_entity_id"] == INPUT_ENTITY_ID
         assert body["output_entity_id"] == OUTPUT_ENTITY_ID
 
     def test_no_dlq_url_sends_nothing(
@@ -353,6 +364,7 @@ class TestFailureNonretryable:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
+        _seed_awaiting(store)
         monitor_job(
             detail=make_detail(
                 status="FAILED",
@@ -361,7 +373,6 @@ class TestFailureNonretryable:
             ),
             log_store=store,
             context=CONTEXT,
-            old_state=ProcessingState.AWAITING,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=None,
@@ -387,7 +398,6 @@ class TestDefaultNow:
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
             context=CONTEXT,
-            old_state=None,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -400,3 +410,333 @@ class TestDefaultNow:
         record = json.loads(resp["Body"].read())
         timestamp = datetime.fromisoformat(record["events"][0]["timestamp"])
         assert before <= timestamp <= after
+
+
+class TestFullLifecycle:
+    """monitor_job now derives old_state itself, so it must handle every
+    Batch status, not just terminal SUCCEEDED/FAILED."""
+
+    def test_submitted_then_awaiting_then_success(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        retry_policy = RetryPolicy(max_attempts=3)
+        kwargs: dict[str, Any] = dict(
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=retry_policy,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+
+        submitted = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
+        assert submitted is ProcessingState.SUBMITTED
+        assert (
+            s3.list_objects_v2(
+                Bucket=bucket,
+                Prefix=S3RecordStore.state_pointer_key(
+                    ProcessingState.SUBMITTED, CONTEXT
+                ),
+            ).get("KeyCount", 0)
+            == 1
+        )
+
+        runnable = monitor_job(detail=make_detail(status="RUNNABLE"), **kwargs)
+        assert runnable is ProcessingState.AWAITING
+        assert (
+            s3.list_objects_v2(
+                Bucket=bucket,
+                Prefix=S3RecordStore.state_pointer_key(
+                    ProcessingState.SUBMITTED, CONTEXT
+                ),
+            ).get("KeyCount", 0)
+            == 0
+        )
+        assert (
+            s3.list_objects_v2(
+                Bucket=bucket,
+                Prefix=S3RecordStore.state_pointer_key(
+                    ProcessingState.AWAITING, CONTEXT
+                ),
+            ).get("KeyCount", 0)
+            == 1
+        )
+
+        success = monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
+        assert success is ProcessingState.SUCCESS
+        assert _output_index_exists(s3, bucket, ProcessingState.SUCCESS)
+
+        key = S3RecordStore.canonical_key(CONTEXT)
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        record = json.loads(resp["Body"].read())
+        assert [e["state"] for e in record["events"]] == [
+            "SUBMITTED",
+            "AWAITING",
+            "SUCCESS",
+        ]
+
+    def test_awaiting_progression_does_not_rewrite_pointer(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        """PENDING -> RUNNABLE -> STARTING -> RUNNING all map to AWAITING;
+        the redundant same-state pointer rewrite should be skipped."""
+        kwargs: dict[str, Any] = dict(
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        for status in ["PENDING", "RUNNABLE", "STARTING", "RUNNING"]:
+            result = monitor_job(detail=make_detail(status=status), **kwargs)
+            assert result is ProcessingState.AWAITING
+
+        record = store.find_state_pointer(context=CONTEXT)
+        assert record is ProcessingState.AWAITING
+
+    def test_resubmitted_attempt_retires_prior_attempt_pointer(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        """A new attempt's first SUBMITTED event must retire the prior
+        (exhausted) attempt's FAILURE_RETRYABLE pointer -- a cross-attempt
+        transition, since state pointers are keyed per attempt."""
+        old_context = dataclasses.replace(CONTEXT, attempt=3)
+        _seed_awaiting(store, old_context)
+        retry_policy = RetryPolicy(max_attempts=3)
+        monitor_job(
+            detail=make_detail(
+                status="FAILED", statusReason="Host EC2 instance terminated"
+            ),
+            log_store=store,
+            context=old_context,
+            retry_policy=retry_policy,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        old_key = S3RecordStore.state_pointer_key(
+            ProcessingState.FAILURE_RETRYABLE, old_context
+        )
+        assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 1
+
+        new_context = dataclasses.replace(CONTEXT, attempt=4)
+        result = monitor_job(
+            detail=make_detail(status="SUBMITTED"),
+            log_store=store,
+            context=new_context,
+            retry_policy=retry_policy,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        assert result is ProcessingState.SUBMITTED
+        assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 0
+        new_key = S3RecordStore.state_pointer_key(
+            ProcessingState.SUBMITTED, new_context
+        )
+        assert s3.list_objects_v2(Bucket=bucket, Prefix=new_key).get("KeyCount", 0) == 1
+
+
+class TestMonotonicityGuard:
+    def test_stale_event_does_not_rewrite_pointer(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        """EventBridge does not guarantee delivery order: a same-attempt
+        event ranked below the recorded state (e.g. a straggling SUBMITTED
+        arriving after SUCCEEDED already landed) must not clobber the
+        pointer, though it is still appended to the canonical record."""
+        kwargs: dict[str, Any] = dict(
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
+        result = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
+        assert result is ProcessingState.SUBMITTED
+
+        assert store.find_state_pointer(context=CONTEXT) is ProcessingState.SUCCESS
+
+        key = S3RecordStore.canonical_key(CONTEXT)
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        record = json.loads(resp["Body"].read())
+        assert [e["state"] for e in record["events"]] == ["SUCCESS", "SUBMITTED"]
+
+
+class TestExitCodeOutcomeRouting:
+    def test_nonretryable_outcome_skips_dlq_when_dlq_false(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY", dlq=False).build()
+        _seed_awaiting(store)
+        result = monitor_job(
+            detail=make_detail(
+                status="FAILED",
+                container={"exitCode": 4},
+            ),
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            exit_code_outcomes=outcomes,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        assert result is ProcessingState.FAILURE_NONRETRYABLE
+        assert _receive_all(sqs, dlq_url) == []
+        assert _receive_all(sqs, retry_queue_url) == []
+
+    def test_nonretryable_outcome_still_sends_dlq_when_dlq_true(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY", dlq=True).build()
+        _seed_awaiting(store)
+        monitor_job(
+            detail=make_detail(
+                status="FAILED",
+                container={"exitCode": 4},
+            ),
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            exit_code_outcomes=outcomes,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        assert len(_receive_all(sqs, dlq_url)) == 1
+
+    def test_label_appears_in_canonical_event(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY", dlq=False).build()
+        _seed_awaiting(store)
+        monitor_job(
+            detail=make_detail(
+                status="FAILED",
+                container={"exitCode": 4},
+            ),
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            exit_code_outcomes=outcomes,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        key = S3RecordStore.canonical_key(CONTEXT)
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        record = json.loads(resp["Body"].read())
+        assert record["events"][-1]["label"] == "CLOUDY"
+
+    def test_label_appears_in_output_index_key(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY", dlq=False).build()
+        _seed_awaiting(store)
+        monitor_job(
+            detail=make_detail(
+                status="FAILED",
+                container={"exitCode": 4},
+            ),
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            exit_code_outcomes=outcomes,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        cloudy_key = S3RecordStore.output_index_key(
+            ProcessingState.FAILURE_NONRETRYABLE, CONTEXT, label="CLOUDY"
+        )
+        assert (
+            s3.list_objects_v2(Bucket=bucket, Prefix=cloudy_key).get("KeyCount", 0) == 1
+        )
+        assert not _output_index_exists(
+            s3, bucket, ProcessingState.FAILURE_NONRETRYABLE
+        )
+
+    def test_retryable_outcome_routes_to_retry_queue(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        outcomes = (
+            ExitCodeOutcomesBuilder()
+            .add(42, "TRANSIENT_TOOL_ERROR", retryable=True)
+            .build()
+        )
+        _seed_awaiting(store)
+        result = monitor_job(
+            detail=make_detail(
+                status="FAILED",
+                container={"exitCode": 42},
+            ),
+            log_store=store,
+            context=CONTEXT,
+            retry_policy=RetryPolicy(max_attempts=3),
+            exit_code_outcomes=outcomes,
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        assert result is ProcessingState.FAILURE_RETRYABLE
+        assert len(_receive_all(sqs, retry_queue_url)) == 1

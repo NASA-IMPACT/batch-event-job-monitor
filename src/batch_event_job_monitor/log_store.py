@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import boto3
@@ -23,6 +23,16 @@ def _render_partition(partition_fields: dict[str, str]) -> str:
     return "".join(f"{k}={v}/" for k, v in partition_fields.items())
 
 
+def _pointer_body(context: JobContext) -> bytes:
+    return json.dumps(
+        {
+            "input_entity_id": context.input_entity_id,
+            "output_entity_id": context.output_entity_id,
+            "attempt": context.attempt,
+        }
+    ).encode()
+
+
 @dataclass
 class S3RecordStore:
     """Three-object S3 log schema.
@@ -30,10 +40,10 @@ class S3RecordStore:
     Objects written per entity processing attempt:
 
     1. Canonical record (append-only events array):
-       records/job_type={job_type}/{partition_fields...}/entity_id={entity_id}/{attempt:03d}.json
+       records/job_type={job_type}/{partition_fields...}/input_entity_id={input_entity_id}/{attempt:03d}.json
 
     2. State pointer (write-new / delete-old, minimal JSON body):
-       state/state={STATE}/job_type={job_type}/{partition_fields...}/entity_id={entity_id}/{attempt:03d}
+       state/state={STATE}/job_type={job_type}/{partition_fields...}/input_entity_id={input_entity_id}/{attempt:03d}
 
     3. Output index (empty body, terminal states only):
        outputs/state={STATE}/job_type={job_type}/{partition_fields...}/{output_entity_id}
@@ -60,7 +70,7 @@ class S3RecordStore:
         partition = _render_partition(context.partition_fields)
         return (
             f"records/job_type={context.job_type}/{partition}"
-            f"entity_id={context.entity_id}/{context.attempt:03d}.json"
+            f"input_entity_id={context.input_entity_id}/{context.attempt:03d}.json"
         )
 
     @staticmethod
@@ -90,11 +100,13 @@ class S3RecordStore:
             S3RecordStore._state_prefix(
                 state, context.job_type, context.partition_fields
             )
-            + f"entity_id={context.entity_id}/{context.attempt:03d}"
+            + f"input_entity_id={context.input_entity_id}/{context.attempt:03d}"
         )
 
     @staticmethod
-    def output_index_key(state: ProcessingState, context: JobContext) -> str:
+    def output_index_key(
+        state: ProcessingState, context: JobContext, label: str | None = None
+    ) -> str:
         """Build the output index key.
 
         Parameters
@@ -103,6 +115,12 @@ class S3RecordStore:
             The terminal state whose output index key is being built.
         context : JobContext
             Identifying and partitioning fields for the job processing event.
+        label : str or None, optional
+            Consumer-defined outcome label (see ExitCodeOutcome), used in
+            place of state.name when given -- e.g. "CLOUDY" instead of
+            "FAILURE_NONRETRYABLE", for reconciliation queries that need
+            the finer-grained outcome. Purely cosmetic in the key: does not
+            affect routing, which is driven by state alone.
 
         Returns
         -------
@@ -111,7 +129,7 @@ class S3RecordStore:
         """
         partition = _render_partition(context.partition_fields)
         return (
-            f"outputs/state={state.name}/job_type={context.job_type}/"
+            f"outputs/state={label or state.name}/job_type={context.job_type}/"
             f"{partition}{context.output_entity_id}"
         )
 
@@ -147,7 +165,7 @@ class S3RecordStore:
             if exc.response["Error"]["Code"] != "NoSuchKey":
                 raise
             record = {
-                "entity_id": context.entity_id,
+                "input_entity_id": context.input_entity_id,
                 "output_entity_id": context.output_entity_id,
                 "job_type": context.job_type,
                 "partition_fields": context.partition_fields,
@@ -174,6 +192,7 @@ class S3RecordStore:
         context: JobContext,
         new_state: ProcessingState,
         old_state: ProcessingState | None,
+        old_attempt: int | None = None,
     ) -> None:
         """Write new state pointer and delete the old one.
 
@@ -185,14 +204,13 @@ class S3RecordStore:
             The state to write a pointer for.
         old_state : ProcessingState or None
             The previous state whose pointer should be deleted, if any.
+        old_attempt : int or None, optional
+            Attempt number of the pointer being replaced, if different from
+            context.attempt -- a cross-attempt transition, e.g. retiring a
+            prior attempt's terminal pointer when the next attempt's first
+            event arrives. Defaults to context.attempt.
         """
-        body = json.dumps(
-            {
-                "entity_id": context.entity_id,
-                "output_entity_id": context.output_entity_id,
-                "attempt": context.attempt,
-            }
-        ).encode()
+        body = _pointer_body(context)
         new_key = self.state_pointer_key(new_state, context)
         self.client.put_object(
             Bucket=self.bucket,
@@ -201,7 +219,12 @@ class S3RecordStore:
             ContentType="application/json",
         )
         if old_state is not None:
-            old_key = self.state_pointer_key(old_state, context)
+            old_context = (
+                context
+                if old_attempt is None or old_attempt == context.attempt
+                else replace(context, attempt=old_attempt)
+            )
+            old_key = self.state_pointer_key(old_state, old_context)
             try:
                 self.client.delete_object(Bucket=self.bucket, Key=old_key)
             except ClientError:
@@ -231,13 +254,7 @@ class S3RecordStore:
         bool
             True if the pointer was written, False if it already existed.
         """
-        body = json.dumps(
-            {
-                "entity_id": context.entity_id,
-                "output_entity_id": context.output_entity_id,
-                "attempt": context.attempt,
-            }
-        ).encode()
+        body = _pointer_body(context)
         key = self.state_pointer_key(state, context)
         try:
             self.client.put_object(
@@ -281,6 +298,7 @@ class S3RecordStore:
         *,
         context: JobContext,
         state: ProcessingState,
+        label: str | None = None,
     ) -> None:
         """Write an empty output index entry for a terminal state.
 
@@ -290,8 +308,10 @@ class S3RecordStore:
             Identifying and partitioning fields for the job processing event.
         state : ProcessingState
             The terminal state to index under.
+        label : str or None, optional
+            Consumer-defined outcome label -- see output_index_key.
         """
-        key = self.output_index_key(state, context)
+        key = self.output_index_key(state, context, label)
         self.client.put_object(Bucket=self.bucket, Key=key, Body=b"")
 
     # -------------------- scanning
@@ -317,7 +337,7 @@ class S3RecordStore:
         -------
         list[dict[str, Any]]
             Dicts parsed from the pointer JSON bodies, each containing
-            entity_id, output_entity_id, and attempt.
+            input_entity_id, output_entity_id, and attempt.
         """
         prefix = self._state_prefix(state, job_type, partition_fields)
         results: list[dict[str, Any]] = []
@@ -331,3 +351,116 @@ class S3RecordStore:
                 except (ClientError, json.JSONDecodeError):
                     logger.warning("Skipping unreadable pointer %s", obj["Key"])
         return results
+
+    # -------------------- current-state lookups
+    def find_state_pointer(self, *, context: JobContext) -> ProcessingState | None:
+        """Look up the state pointer for an exact (entity, attempt).
+
+        Checks existence of each of the 5 possible state pointers for this
+        context via head_object. Used for same-attempt transitions.
+
+        Returns
+        -------
+        ProcessingState or None
+            The recorded state, or None if this (entity, attempt) has no
+            pointer yet. If more than one state pointer exists (a previous
+            delete_object failure left a stale one behind -- see
+            write_state_pointer), logs a warning and returns the
+            highest-ranked state as authoritative.
+        """
+        hits: list[ProcessingState] = []
+        for state in ProcessingState:
+            key = self.state_pointer_key(state, context)
+            try:
+                self.client.head_object(Bucket=self.bucket, Key=key)
+                hits.append(state)
+            except ClientError as exc:
+                code = exc.response["Error"]["Code"]
+                if code not in ("404", "NoSuchKey", "NotFound"):
+                    raise
+        if not hits:
+            return None
+        if len(hits) > 1:
+            logger.warning(
+                "Multiple state pointers found for job_type=%s input_entity_id=%s "
+                "attempt=%d: %s",
+                context.job_type,
+                context.input_entity_id,
+                context.attempt,
+                [state.name for state in hits],
+            )
+        return max(hits, key=lambda state: state.rank)
+
+    def find_active_pointer(
+        self,
+        *,
+        job_type: str,
+        partition_fields: dict[str, str],
+        input_entity_id: str,
+    ) -> tuple[ProcessingState, int] | None:
+        """Look up an entity's active pointer, regardless of attempt.
+
+        Bounded scan: one list_objects_v2 call per of the 5 possible
+        states, prefixed to this input_entity_id (ignoring the attempt suffix).
+        Used only when a SUBMITTED event's exact (entity, attempt) has no
+        pointer yet, to find whichever prior attempt's pointer needs
+        retiring.
+
+        Returns
+        -------
+        tuple[ProcessingState, int] or None
+            The (state, attempt) parsed from the active pointer's body, or
+            None if the entity has no active pointer (a brand-new entity).
+            If more than one hit is found, logs a warning and returns the
+            highest-ranked (then highest-attempt) hit as authoritative.
+        """
+        hits: list[tuple[ProcessingState, int]] = []
+        for state in ProcessingState:
+            prefix = (
+                self._state_prefix(state, job_type, partition_fields)
+                + f"input_entity_id={input_entity_id}/"
+            )
+            resp = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
+            for obj in resp.get("Contents", []):
+                try:
+                    body = self.client.get_object(Bucket=self.bucket, Key=obj["Key"])
+                    data = json.loads(body["Body"].read())
+                    hits.append((state, int(data["attempt"])))
+                except (ClientError, json.JSONDecodeError, KeyError, ValueError):
+                    logger.warning("Skipping unreadable pointer %s", obj["Key"])
+        if not hits:
+            return None
+        if len(hits) > 1:
+            logger.warning(
+                "Multiple active pointers found for job_type=%s input_entity_id=%s: %s",
+                job_type,
+                input_entity_id,
+                hits,
+            )
+        return max(hits, key=lambda hit: (hit[0].rank, hit[1]))
+
+    def next_attempt(
+        self,
+        *,
+        job_type: str,
+        partition_fields: dict[str, str],
+        input_entity_id: str,
+    ) -> int:
+        """Compute the next attempt number for an entity.
+
+        Convenience wrapper over find_active_pointer for ad hoc/backfill
+        submitters who want the correct next bejm_attempt without
+        hand-rolling the lookup.
+
+        Returns
+        -------
+        int
+            1 if the entity has no active pointer, else the active
+            pointer's attempt number plus one.
+        """
+        active = self.find_active_pointer(
+            job_type=job_type,
+            partition_fields=partition_fields,
+            input_entity_id=input_entity_id,
+        )
+        return 1 if active is None else active[1] + 1

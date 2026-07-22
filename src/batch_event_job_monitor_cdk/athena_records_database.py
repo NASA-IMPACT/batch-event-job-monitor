@@ -6,7 +6,7 @@ queryable immediately as records land -- no ``MSCK REPAIR TABLE`` or Glue
 crawler needed.
 
 S3 key schema:
-  ``records/job_type={job_type}/{partition_fields...}/entity_id={entity_id}/{attempt:03d}.json``
+  ``records/job_type={job_type}/{partition_fields...}/input_entity_id={input_entity_id}/{attempt:03d}.json``
 
 ``partition_keys`` is the full ordered partition-key list, including the
 leading ``job_type`` entry -- job_type is just another partition key at this
@@ -36,7 +36,7 @@ _EVENTS_TYPE = (
 # Partition keys are excluded here -- their values are read from the object
 # key path, not the JSON body.
 _COLUMNS = [
-    ("entity_id", "string", "Processed entity identifier"),
+    ("input_entity_id", "string", "Processed entity identifier"),
     ("output_entity_id", "string", "Output entity identifier"),
     ("attempt", "int", "Attempt number (1-indexed)"),
     ("batch_job_id", "string", "AWS Batch job ID"),

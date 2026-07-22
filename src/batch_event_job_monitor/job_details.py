@@ -1,12 +1,32 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from batch_event_job_monitor.models import ProcessingState, RetryPolicy
+from batch_event_job_monitor.models import (
+    Classification,
+    ExitCodeOutcomes,
+    JobContext,
+    ProcessingState,
+    RetryPolicy,
+)
 
 if TYPE_CHECKING:
     from mypy_boto3_batch.type_defs import JobDetailTypeDef
+
+_PARAM_PREFIX = "bejm_"
+_REQUIRED_PARAM_KEYS = (
+    "job_type",
+    "input_entity_id",
+    "output_entity_id",
+    "partition_fields",
+    "attempt",
+)
+
+# Non-terminal Batch statuses, collapsed to AWAITING -- the distinction
+# between them (queueing vs. actually running) is not tracked.
+_AWAITING_STATUSES = frozenset({"PENDING", "RUNNABLE", "STARTING", "RUNNING"})
 
 
 @dataclass
@@ -70,22 +90,118 @@ class JobDetails:
 
         return None
 
-    def classify(self, retry_policy: RetryPolicy) -> ProcessingState:
-        """Classify this job's outcome into a ProcessingState.
+    def classify(
+        self,
+        retry_policy: RetryPolicy,
+        exit_code_outcomes: ExitCodeOutcomes | None = None,
+    ) -> Classification:
+        """Classify this job's status.
 
-        The Lambda that calls this is only ever invoked for terminal
-        SUCCEEDED/FAILED job state change events, so any other status
-        indicates a wiring bug.
+        Called for every aws.batch job state change event, not only
+        terminal ones -- SUBMITTED/PENDING/RUNNABLE/STARTING/RUNNING map to
+        non-terminal ProcessingStates.
+
+        Parameters
+        ----------
+        retry_policy : RetryPolicy
+            Used for the built-in spot-interruption classification fallback.
+        exit_code_outcomes : ExitCodeOutcomes or None, optional
+            Deploy-time, job_type-specific exit-code taxonomy (see
+            JobTypeConfig) -- resolved by the caller, not read from this
+            job's own Batch parameters, since it's container/image-tied
+            configuration, not per-job data. Checked first for a FAILED
+            status; falls back to the spot-interruption-prefix check when
+            no outcome matches this job's exit code.
         """
+        if self.status == "SUBMITTED":
+            return Classification(state=ProcessingState.SUBMITTED)
+
+        if self.status in _AWAITING_STATUSES:
+            return Classification(state=ProcessingState.AWAITING)
+
         if self.status == "SUCCEEDED":
-            return ProcessingState.SUCCESS
+            return Classification(state=ProcessingState.SUCCESS)
 
         if self.status == "FAILED":
+            outcome = (exit_code_outcomes or ExitCodeOutcomes()).get(self.exit_code)
+            if outcome is not None:
+                state = (
+                    ProcessingState.FAILURE_RETRYABLE
+                    if outcome.retryable
+                    else ProcessingState.FAILURE_NONRETRYABLE
+                )
+                return Classification(state=state, label=outcome.label, dlq=outcome.dlq)
+
             status_reason = self.status_reason or ""
             if status_reason.startswith(
                 retry_policy.spot_interruption_status_reason_prefixes
             ):
-                return ProcessingState.FAILURE_RETRYABLE
-            return ProcessingState.FAILURE_NONRETRYABLE
+                return Classification(state=ProcessingState.FAILURE_RETRYABLE)
+            return Classification(state=ProcessingState.FAILURE_NONRETRYABLE)
 
-        raise ValueError(f"Unexpected non-terminal job status: {self.status!r}")
+        raise ValueError(f"Unrecognized job status: {self.status!r}")
+
+    @property
+    def parameters(self) -> dict[str, str]:
+        """AWS Batch SubmitJobRequest.parameters echoed back on this job."""
+        return self._typed_raw.get("parameters") or {}
+
+    def decode_context(self) -> JobContext:
+        """Decode the JobContext from this job's Batch parameters.
+
+        Raises
+        ------
+        ValueError
+            Listing every missing or malformed reserved parameter at once.
+            This decodes external input (the raw EventBridge detail), so
+            explicit validation with an actionable message is warranted
+            here, unlike this codebase's internal code paths.
+        """
+        parameters = self.parameters
+        stripped = {
+            key[len(_PARAM_PREFIX) :]: value
+            for key, value in parameters.items()
+            if key.startswith(_PARAM_PREFIX)
+        }
+
+        missing = [
+            f"{_PARAM_PREFIX}{key}"
+            for key in _REQUIRED_PARAM_KEYS
+            if key not in stripped
+        ]
+        if missing:
+            raise ValueError(
+                f"Batch job {self.job_id!r} is missing required monitoring "
+                f"parameters: {', '.join(missing)}. Set these via "
+                "JobContext.to_batch_parameters() on SubmitJobRequest.parameters "
+                "when submitting jobs monitored by JobMonitorFunction."
+            )
+
+        try:
+            attempt = int(stripped["attempt"])
+        except ValueError as exc:
+            raise ValueError(
+                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}attempt is not an "
+                f"integer: {stripped['attempt']!r}"
+            ) from exc
+
+        try:
+            partition_fields = json.loads(stripped["partition_fields"])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}partition_fields is "
+                "not valid JSON"
+            ) from exc
+        if not isinstance(partition_fields, dict):
+            raise ValueError(
+                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}partition_fields must "
+                f"decode to an object, got {type(partition_fields).__name__}"
+            )
+
+        return JobContext(
+            job_type=stripped["job_type"],
+            partition_fields=partition_fields,
+            input_entity_id=stripped["input_entity_id"],
+            output_entity_id=stripped["output_entity_id"],
+            attempt=attempt,
+        )

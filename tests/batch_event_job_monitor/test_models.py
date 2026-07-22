@@ -1,10 +1,18 @@
 import enum
+import json
 
 import pytest
 
 from batch_event_job_monitor.models import (
+    Classification,
+    ExitCodeOutcome,
+    ExitCodeOutcomes,
+    ExitCodeOutcomesBuilder,
+    JobContext,
+    JobTypeConfig,
     ProcessingEventRecord,
     ProcessingState,
+    RetryMessage,
     RetryPolicy,
 )
 
@@ -34,6 +42,25 @@ class TestProcessingState:
         assert ProcessingState.FAILURE_NONRETRYABLE.value == "FAILURE_NONRETRYABLE"
 
 
+class TestRank:
+    """Tests for ProcessingState.rank."""
+
+    def test_submitted_ranks_below_awaiting(self) -> None:
+        assert ProcessingState.SUBMITTED.rank < ProcessingState.AWAITING.rank
+
+    def test_awaiting_ranks_below_terminal_states(self) -> None:
+        assert ProcessingState.AWAITING.rank < ProcessingState.SUCCESS.rank
+        assert ProcessingState.AWAITING.rank < ProcessingState.FAILURE_RETRYABLE.rank
+        assert ProcessingState.AWAITING.rank < ProcessingState.FAILURE_NONRETRYABLE.rank
+
+    def test_terminal_states_tie(self) -> None:
+        assert (
+            ProcessingState.SUCCESS.rank
+            == ProcessingState.FAILURE_RETRYABLE.rank
+            == ProcessingState.FAILURE_NONRETRYABLE.rank
+        )
+
+
 class TestRetryPolicy:
     """Tests for RetryPolicy dataclass."""
 
@@ -57,6 +84,19 @@ class TestRetryPolicy:
         policy = RetryPolicy()
         with pytest.raises(AttributeError):
             policy.max_attempts = 5  # type: ignore[misc]
+
+    def test_to_dict_from_dict_round_trips(self) -> None:
+        policy = RetryPolicy(
+            max_attempts=5, spot_interruption_status_reason_prefixes=("Custom",)
+        )
+        assert RetryPolicy.from_dict(policy.to_dict()) == policy
+
+    def test_from_dict_missing_keys_uses_defaults(self) -> None:
+        assert RetryPolicy.from_dict({}) == RetryPolicy()
+
+    def test_to_dict_is_json_serializable(self) -> None:
+        policy = RetryPolicy()
+        assert json.loads(json.dumps(policy.to_dict())) == policy.to_dict()
 
 
 class TestIsTerminal:
@@ -199,3 +239,209 @@ class TestProcessingEventRecord:
         )
         result = record.to_dict()
         assert isinstance(result, dict)
+
+
+class TestJobContext:
+    """Tests for JobContext.to_batch_parameters."""
+
+    def test_new_defaults_to_attempt_one(self) -> None:
+        context = JobContext.new(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_id="12TVK_2024-06_source",
+            output_entity_id="12TVK_2024-06_output",
+        )
+        assert context.attempt == 1
+
+    def test_next_attempt_increments(self) -> None:
+        context = JobContext(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_id="12TVK_2024-06_source",
+            output_entity_id="12TVK_2024-06_output",
+            attempt=2,
+        )
+        assert context.next_attempt().attempt == 3
+
+    def test_next_attempt_preserves_other_fields(self) -> None:
+        context = JobContext(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_id="12TVK_2024-06_source",
+            output_entity_id="12TVK_2024-06_output",
+            attempt=1,
+        )
+        next_context = context.next_attempt()
+        assert next_context.job_type == context.job_type
+        assert next_context.partition_fields == context.partition_fields
+        assert next_context.input_entity_id == context.input_entity_id
+        assert next_context.output_entity_id == context.output_entity_id
+
+    def test_encodes_all_identity_fields(self) -> None:
+        context = JobContext(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK", "year_month": "2024-06"},
+            input_entity_id="12TVK_2024-06_source",
+            output_entity_id="12TVK_2024-06_output",
+            attempt=2,
+        )
+        params = context.to_batch_parameters()
+        assert params == {
+            "bejm_job_type": "monthly-composite",
+            "bejm_input_entity_id": "12TVK_2024-06_source",
+            "bejm_output_entity_id": "12TVK_2024-06_output",
+            "bejm_partition_fields": json.dumps(
+                {"tile_id": "12TVK", "year_month": "2024-06"}, sort_keys=True
+            ),
+            "bejm_attempt": "2",
+        }
+
+    def test_partition_fields_round_trips_through_json(self) -> None:
+        context = JobContext(
+            job_type="job",
+            partition_fields={"b": "2", "a": "1"},
+            input_entity_id="e",
+            output_entity_id="o",
+            attempt=1,
+        )
+        params = context.to_batch_parameters()
+        assert json.loads(params["bejm_partition_fields"]) == {"a": "1", "b": "2"}
+
+
+class TestRetryMessage:
+    """Tests for RetryMessage."""
+
+    def _context(self) -> JobContext:
+        return JobContext(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_id="12TVK_2024-06_source",
+            output_entity_id="12TVK_2024-06_output",
+            attempt=1,
+        )
+
+    def test_from_context_round_trips_to_context(self) -> None:
+        context = self._context()
+        message = RetryMessage.from_context(context, batch_job_id="batch-123")
+        assert message.context == context
+        assert message.batch_job_id == "batch-123"
+
+    def test_to_json_is_flat(self) -> None:
+        message = RetryMessage.from_context(self._context(), batch_job_id="batch-123")
+        body = json.loads(message.to_json())
+        assert body == {
+            "job_type": "monthly-composite",
+            "partition_fields": {"tile_id": "12TVK"},
+            "input_entity_id": "12TVK_2024-06_source",
+            "output_entity_id": "12TVK_2024-06_output",
+            "attempt": 1,
+            "batch_job_id": "batch-123",
+            "label": None,
+        }
+
+    def test_from_json_round_trips(self) -> None:
+        message = RetryMessage.from_context(self._context(), batch_job_id="batch-123")
+        assert RetryMessage.from_json(message.to_json()) == message
+
+    def test_label_round_trips(self) -> None:
+        message = RetryMessage.from_context(
+            self._context(), batch_job_id="batch-123", label="CLOUDY"
+        )
+        assert message.label == "CLOUDY"
+        assert RetryMessage.from_json(message.to_json()).label == "CLOUDY"
+
+
+class TestClassification:
+    def test_defaults(self) -> None:
+        classification = Classification(state=ProcessingState.SUCCESS)
+        assert classification.label is None
+        assert classification.dlq is True
+
+
+class TestExitCodeOutcome:
+    def test_defaults(self) -> None:
+        outcome = ExitCodeOutcome(label="CLOUDY")
+        assert outcome.retryable is False
+        assert outcome.dlq is True
+
+
+class TestExitCodeOutcomes:
+    def test_get_returns_none_for_unmapped_exit_code(self) -> None:
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(label="CLOUDY")})
+        assert outcomes.get(1) is None
+
+    def test_get_returns_none_for_none_exit_code(self) -> None:
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(label="CLOUDY")})
+        assert outcomes.get(None) is None
+
+    def test_get_returns_mapped_outcome(self) -> None:
+        outcome = ExitCodeOutcome(label="CLOUDY", dlq=False)
+        outcomes = ExitCodeOutcomes({4: outcome})
+        assert outcomes.get(4) == outcome
+
+    def test_empty_mapping_round_trips(self) -> None:
+        assert ExitCodeOutcomes.from_dict(ExitCodeOutcomes().to_dict()) == (
+            ExitCodeOutcomes()
+        )
+
+    def test_to_dict_from_dict_round_trips(self) -> None:
+        outcomes = ExitCodeOutcomes(
+            {
+                3: ExitCodeOutcome(label="LOW_SUN_ANGLE", dlq=False),
+                4: ExitCodeOutcome(label="CLOUDY", dlq=False),
+                42: ExitCodeOutcome(label="TRANSIENT", retryable=True),
+            }
+        )
+        decoded = ExitCodeOutcomes.from_dict(outcomes.to_dict())
+        assert decoded == outcomes
+
+    def test_to_dict_is_json_serializable(self) -> None:
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(label="CLOUDY", dlq=False)})
+        assert json.loads(json.dumps(outcomes.to_dict())) == outcomes.to_dict()
+
+
+class TestExitCodeOutcomesBuilder:
+    def test_add_returns_self_for_chaining(self) -> None:
+        builder = ExitCodeOutcomesBuilder()
+        assert builder.add(3, "LOW_SUN_ANGLE") is builder
+
+    def test_build_produces_expected_mapping(self) -> None:
+        outcomes = (
+            ExitCodeOutcomesBuilder()
+            .add(3, "LOW_SUN_ANGLE", dlq=False)
+            .add(4, "CLOUDY", dlq=False)
+            .build()
+        )
+        assert outcomes.get(3) == ExitCodeOutcome(label="LOW_SUN_ANGLE", dlq=False)
+        assert outcomes.get(4) == ExitCodeOutcome(label="CLOUDY", dlq=False)
+
+    def test_add_overwrites_same_exit_code(self) -> None:
+        outcomes = ExitCodeOutcomesBuilder().add(3, "FIRST").add(3, "SECOND").build()
+        assert outcomes.get(3) == ExitCodeOutcome(label="SECOND")
+
+
+class TestJobTypeConfig:
+    def test_defaults(self) -> None:
+        config = JobTypeConfig()
+        assert config.retry_policy == RetryPolicy()
+        assert config.exit_code_outcomes == ExitCodeOutcomes()
+
+    def test_to_dict_from_dict_round_trips(self) -> None:
+        config = JobTypeConfig(
+            retry_policy=RetryPolicy(max_attempts=5),
+            exit_code_outcomes=ExitCodeOutcomes(
+                {4: ExitCodeOutcome(label="CLOUDY", dlq=False)}
+            ),
+        )
+        assert JobTypeConfig.from_dict(config.to_dict()) == config
+
+    def test_from_dict_missing_keys_uses_defaults(self) -> None:
+        assert JobTypeConfig.from_dict({}) == JobTypeConfig()
+
+    def test_to_dict_is_json_serializable(self) -> None:
+        config = JobTypeConfig(
+            exit_code_outcomes=ExitCodeOutcomes(
+                {4: ExitCodeOutcome(label="CLOUDY", dlq=False)}
+            )
+        )
+        assert json.loads(json.dumps(config.to_dict())) == config.to_dict()
