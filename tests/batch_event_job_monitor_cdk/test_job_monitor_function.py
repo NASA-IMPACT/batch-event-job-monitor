@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from aws_cdk import App, Stack, aws_s3 as s3, aws_sqs as sqs
+from aws_cdk import App, Stack, aws_batch as batch, aws_s3 as s3, aws_sqs as sqs
 from aws_cdk.assertions import Match, Template
 
 from batch_event_job_monitor.models import (
@@ -29,6 +29,14 @@ def _make_stack(
     bucket = s3.Bucket(stack, "Bucket")
     retry_queue = sqs.Queue(stack, "RetryQueue") if with_retry_queue else None
     dlq = sqs.Queue(stack, "Dlq") if with_dlq else None
+    job_queues = (
+        [
+            batch.JobQueue.from_job_queue_arn(stack, f"JobQueue{i}", arn)
+            for i, arn in enumerate(job_queue_arns)
+        ]
+        if job_queue_arns is not None
+        else None
+    )
     construct = JobMonitorFunction(
         stack,
         "TestJobMonitorFunction",
@@ -37,7 +45,7 @@ def _make_stack(
         default_job_type_config=default_job_type_config,
         retry_queue=retry_queue,
         dlq=dlq,
-        job_queue_arns=job_queue_arns,
+        job_queues=job_queues,
     )
     return stack, construct
 

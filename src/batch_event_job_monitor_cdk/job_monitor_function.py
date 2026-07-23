@@ -18,6 +18,7 @@ from typing import Any
 
 from aws_cdk import (
     Duration,
+    aws_batch as batch,
     aws_events as events,
     aws_events_targets as targets,
     aws_lambda as _lambda,
@@ -95,8 +96,8 @@ class JobMonitorFunction(Construct):
     dlq : sqs.IQueue or None, optional
         SQS queue to notify for terminal non-success outcomes. If not
         given, no DLQ routing occurs.
-    job_queue_arns : list[str] or None, optional
-        AWS Batch job queue ARNs to scope the EventBridge rule to. If not
+    job_queues : list[batch.IJobQueue] or None, optional
+        AWS Batch job queues to scope the EventBridge rule to. If not
         given, the rule matches job state changes from any queue.
     function_name : str or None, optional
         Explicit Lambda function name.
@@ -126,7 +127,7 @@ class JobMonitorFunction(Construct):
         default_job_type_config: JobTypeConfig | None = None,
         retry_queue: sqs.IQueue | None = None,
         dlq: sqs.IQueue | None = None,
-        job_queue_arns: list[str] | None = None,
+        job_queues: list[batch.IJobQueue] | None = None,
         function_name: str | None = None,
         memory_size: int = 256,
         timeout: Duration = Duration.minutes(1),
@@ -171,8 +172,8 @@ class JobMonitorFunction(Construct):
             dlq.grant_send_messages(self.function)
 
         detail: dict[str, Any] = {"status": _ALL_BATCH_STATUSES}
-        if job_queue_arns is not None:
-            detail["jobQueue"] = job_queue_arns
+        if job_queues is not None:
+            detail["jobQueue"] = [q.job_queue_arn for q in job_queues]
 
         self.rule = events.Rule(
             self,

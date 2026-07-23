@@ -1,10 +1,14 @@
-"""Example Lambda handler for JobResubmitFunction.
+"""Bundled default Lambda handler for JobResubmitFunction.
 
-This file ships as documentation only -- it is not part of the
-batch-event-job-monitor package and is not importable. Copy it into your
-own repo, point JobResubmitFunction's `entry`/`index` at it, and fill in
-build_submit_job_params for your job type's AWS Batch job definition,
-queue, and container overrides.
+Generic resubmission: reuses the same Batch job queue and job definition
+every attempt, with no custom containerOverrides/command. Covers the
+common case with zero consumer-authored Python, the same way
+job_monitor_handler.py does for JobMonitorFunction.
+
+For anything more complex (per-attempt container overrides, a computed
+command, batch:DescribeJobs-driven introspection of the original job),
+supply your own entry/index to JobResubmitFunction instead of using this
+default -- see docs/resubmitting-jobs.md.
 """
 
 from __future__ import annotations
@@ -23,13 +27,7 @@ if TYPE_CHECKING:
 _batch_client = boto3.client("batch")
 
 
-def build_submit_job_params(context: JobContext) -> dict[str, Any]:
-    """Return batch_client.submit_job kwargs for the given (new) attempt.
-
-    Fill this in for your job type: job queue, job definition, container
-    overrides/command, etc. The bejm_* identity parameters are injected by
-    resubmit_job automatically -- do not set them here.
-    """
+def _build_submit_job_params(context: JobContext) -> dict[str, Any]:
     return {
         "jobName": f"{context.job_type}-{context.input_entity_id}-{context.attempt}",
         "jobQueue": os.environ["BATCH_JOB_QUEUE_ARN"],
@@ -46,7 +44,7 @@ def handler(event: SQSEvent, context: Context) -> dict[str, list[dict[str, str]]
             message = RetryMessage.from_json(record["body"])
             resubmit_job(
                 batch_client=_batch_client,
-                build_submit_job_params=build_submit_job_params,
+                build_submit_job_params=_build_submit_job_params,
                 context=message.context,
             )
         except Exception:

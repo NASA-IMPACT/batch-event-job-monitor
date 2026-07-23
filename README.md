@@ -142,13 +142,9 @@ Write your own Lambda handler and wire it up yourself.
 
 ## Resubmitting jobs: `JobResubmitFunction`
 
-Unlike the job monitor, the resubmit Lambda can't be fully generic: the AWS
-Batch `submit_job` parameters (job definition, container overrides, etc.)
-are inherently job-type specific. `JobResubmitFunction` wires the supporting
-infrastructure (the retry-queue event source, IAM permissions) around a
-Lambda entry point you provide -- see `examples/job_resubmit_handler.py` for
-a starting point. That file ships as documentation only; it is not part of
-the installable package.
+`JobResubmitFunction` bundles a generic default handler for the common
+case (same job queue/job definition every attempt) -- no consumer-authored
+Lambda code needed:
 
 ```python
 from batch_event_job_monitor_cdk import JobResubmitFunction
@@ -156,13 +152,17 @@ from batch_event_job_monitor_cdk import JobResubmitFunction
 JobResubmitFunction(
     self,
     "JobResubmit",
-    entry="lambda/job_resubmit",
-    index="handler.py",
+    job_queue=job_queue,            # aws_cdk.aws_batch.IJobQueue
+    job_definition=job_definition,  # aws_cdk.aws_batch.IJobDefinition
     retry_queue=retry_queue,
-    batch_job_queue_arn=job_queue.job_queue_arn,
-    batch_job_definition_arn=job_definition.job_definition_arn,
 )
 ```
+
+For per-attempt `containerOverrides`, a computed command, or
+`batch:DescribeJobs`-driven introspection of the original job, supply your
+own `entry`/`index` instead -- see
+[`docs/resubmitting-jobs.md`](docs/resubmitting-jobs.md) for the override
+path and a starting-point handler.
 
 ## Origin
 
