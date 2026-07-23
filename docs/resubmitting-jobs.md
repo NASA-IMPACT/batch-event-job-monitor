@@ -1,15 +1,13 @@
 # Resubmitting jobs
 
-`JobResubmitFunction` consumes the retry queue `monitor_job` publishes to
-and calls AWS Batch `submit_job` for the next attempt. It bundles a
-generic default handler covering the common case, and can wrap a
-consumer-authored handler instead for anything the default can't express.
+`JobResubmitFunction` consumes the retry queue `monitor_job` publishes to and calls AWS Batch `submit_job` for the next
+attempt. It bundles a generic default handler covering the common case, and can wrap a consumer-authored handler instead
+for anything the default can't express.
 
 ## The default: same job queue and job definition every attempt
 
-If resubmission always reuses the same Batch job queue and job definition
--- no per-attempt `containerOverrides`, no computed command -- the default
-handler needs zero consumer-authored Python:
+If resubmission always reuses the same Batch job queue and job definition -- no per-attempt `containerOverrides`, no
+computed command -- the default handler needs zero consumer-authored Python:
 
 ```python
 from aws_cdk import aws_batch as batch
@@ -24,20 +22,17 @@ JobResubmitFunction(
 )
 ```
 
-The default handler (`batch_event_job_monitor.handlers.job_resubmit_handler`)
-parses each SQS record as a `RetryMessage`, calls `resubmit_job` with
-`jobQueue`/`jobDefinition` taken from the construct's `BATCH_JOB_QUEUE_ARN`/
-`BATCH_JOB_DEFINITION_ARN` environment variables, and reports per-record
-failures via `batchItemFailures` so a single bad message doesn't fail the
-whole batch.
+The default handler (`batch_event_job_monitor.handlers.job_resubmit_handler`) parses each SQS record as a
+`RetryMessage`, calls `resubmit_job` with `jobQueue`/`jobDefinition` taken from the construct's `BATCH_JOB_QUEUE_ARN`/
+`BATCH_JOB_DEFINITION_ARN` environment variables, and reports per-record failures via `batchItemFailures` so a single
+bad message doesn't fail the whole batch.
 
 ## Overriding: custom `containerOverrides`, a computed command, or job introspection
 
-Some job types need more: different container overrides per attempt, a
-command built from the job's identity fields, or `batch:DescribeJobs`-driven
-introspection of the original job. For those, supply your own `entry`/`index`
--- `JobResubmitFunction` wires the same SQS event source and IAM permissions
-around your handler instead of the bundled default:
+Some job types need more: different container overrides per attempt, a command built from the job's identity fields, or
+`batch:DescribeJobs`-driven introspection of the original job. For those, supply your own `entry`/`index` --
+`JobResubmitFunction` wires the same SQS event source and IAM permissions around your handler instead of the bundled
+default:
 
 ```python
 JobResubmitFunction(
@@ -102,6 +97,5 @@ def handler(event: SQSEvent, context: Context) -> dict[str, list[dict[str, str]]
     return {"batchItemFailures": batch_item_failures}
 ```
 
-`entry` and `index` must be given together -- `JobResubmitFunction` raises
-`ValueError` if only one is set. When both are omitted, the bundled default
-handler is used.
+`entry` and `index` must be given together -- `JobResubmitFunction` raises `ValueError` if only one is set. When both
+are omitted, the bundled default handler is used.

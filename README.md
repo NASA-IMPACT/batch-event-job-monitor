@@ -3,32 +3,28 @@
 Reusable AWS Batch job-monitoring components:
 
 - an S3-backed job log store
-- a Lambda-based job monitor core, tracking a job's full lifecycle
-  (submission through terminal outcome)
+- a Lambda-based job monitor core, tracking a job's full lifecycle (submission through terminal outcome)
 - CDK constructs for:
   - the supporting processing bucket
   - Athena/Glue databases used to query job logs
   - `JobMonitorFunction`: a batteries-included job-monitor Lambda
-  - `JobResubmitFunction`: infrastructure for a retry-queue-driven resubmit
-    Lambda
+  - `JobResubmitFunction`: infrastructure for a retry-queue-driven resubmit Lambda
 
 ## The `bejm_*` parameters contract
 
-The job monitor is the single owner of state tracking for a job: it derives
-a job's previous state itself (from S3), rather than trusting a caller to
-supply it, so any submission path -- your normal pipeline, `resubmit_job`,
-or an ad hoc/backfill job submitted by hand -- is tracked correctly as long
-as it sets a few identifying parameters on the AWS Batch
-`SubmitJobRequest.parameters` (a flat `dict[str, str]`, echoed back into
-every EventBridge job state-change event for that job's life):
+The job monitor is the single owner of state tracking for a job: it derives a job's previous state itself (from S3),
+rather than trusting a caller to supply it, so any submission path -- your normal pipeline, `resubmit_job`, or an ad
+hoc/backfill job submitted by hand -- is tracked correctly as long as it sets a few identifying parameters on the AWS
+Batch `SubmitJobRequest.parameters` (a flat `dict[str, str]`, echoed back into every EventBridge job state-change event
+for that job's life):
 
-| Parameter | Meaning |
-|---|---|
-| `bejm_job_type` | The job type. |
-| `bejm_input_entity_id` | The processed (input) entity identifier. |
-| `bejm_output_entity_id` | The output entity identifier. |
+| Parameter               | Meaning                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| `bejm_job_type`         | The job type.                                                       |
+| `bejm_input_entity_id`  | The processed (input) entity identifier.                            |
+| `bejm_output_entity_id` | The output entity identifier.                                       |
 | `bejm_partition_fields` | JSON-encoded `dict[str, str]` of ordered partition key/value pairs. |
-| `bejm_attempt` | 1-based attempt number, as a string. |
+| `bejm_attempt`          | 1-based attempt number, as a string.                                |
 
 Build these with `JobContext.to_batch_parameters()`:
 
@@ -52,18 +48,14 @@ submit_job(
 )
 ```
 
-Resubmitting an already-tracked entity outside the retry-queue flow (e.g. a
-manual resubmission via the Batch console/CLI)? Use
-`S3RecordStore.next_attempt(...)` to get the correct next `attempt` without
-hand-computing it.
+Resubmitting an already-tracked entity outside the retry-queue flow (e.g. a manual resubmission via the Batch
+console/CLI)? Use `S3RecordStore.next_attempt(...)` to get the correct next `attempt` without hand-computing it.
 
 ## Batteries included: `JobMonitorFunction`
 
-`JobMonitorFunction` bundles its own Lambda handler -- no consumer-authored
-Python is required for the common case. It wires an EventBridge rule
-matching every `aws.batch` job state-change event to the bundled handler,
-which decodes the `bejm_*` identity parameters and calls `monitor_job`
-internally.
+`JobMonitorFunction` bundles its own Lambda handler -- no consumer-authored Python is required for the common case. It
+wires an EventBridge rule matching every `aws.batch` job state-change event to the bundled handler, which decodes the
+`bejm_*` identity parameters and calls `monitor_job` internally.
 
 ```python
 from batch_event_job_monitor.models import JobTypeConfig, RetryPolicy
@@ -81,12 +73,10 @@ JobMonitorFunction(
 
 ### Per-job_type classification config
 
-Retry policy and exit-code handling are deploy-time configuration -- tied
-to a container image/tag, not to any individual job -- so they're resolved
-by `JobMonitorFunction` itself from a `JobTypeConfig`, not read from a
-job's own Batch parameters. This also means retry behavior can differ by
-job_type: some job types are flakier than others (e.g. ones calling
-external services).
+Retry policy and exit-code handling are deploy-time configuration -- tied to a container image/tag, not to any
+individual job -- so they're resolved by `JobMonitorFunction` itself from a `JobTypeConfig`, not read from a job's own
+Batch parameters. This also means retry behavior can differ by job_type: some job types are flakier than others (e.g.
+ones calling external services).
 
 ```python
 from batch_event_job_monitor.models import (
@@ -117,34 +107,27 @@ JobMonitorFunction(
 )
 ```
 
-A job_type not listed in `job_type_configs` uses `default_job_type_config`.
-Changing either requires a redeploy of `JobMonitorFunction` -- there is no
-per-job or per-invocation override, consistent with this being
-container-tied configuration, not job data.
+A job_type not listed in `job_type_configs` uses `default_job_type_config`. Changing either requires a redeploy of
+`JobMonitorFunction` -- there is no per-job or per-invocation override, consistent with this being container-tied
+configuration, not job data.
 
-Within `ExitCodeOutcome`, `retryable` (default `False`) selects
-`FAILURE_RETRYABLE` vs `FAILURE_NONRETRYABLE` for routing/retry purposes;
-`dlq` (default `True`) controls whether a terminal instance of that
-outcome is sent to the DLQ. `label` is descriptive only -- it appears in
-the canonical event and replaces the state name in the output-index key
-(e.g. `outputs/state=CLOUDY/...` instead of
-`outputs/state=FAILURE_NONRETRYABLE/...`) but never affects routing. State
-*pointer* keys are unaffected by `label` -- they stay on the fixed
-`ProcessingState` taxonomy, since `monitor_job`'s internal bounded state
-lookups depend on enumerating a closed set.
+Within `ExitCodeOutcome`, `retryable` (default `False`) selects `FAILURE_RETRYABLE` vs `FAILURE_NONRETRYABLE` for
+routing/retry purposes; `dlq` (default `True`) controls whether a terminal instance of that outcome is sent to the DLQ.
+`label` is descriptive only -- it appears in the canonical event and replaces the state name in the output-index key
+(e.g. `outputs/state=CLOUDY/...` instead of `outputs/state=FAILURE_NONRETRYABLE/...`) but never affects routing. State
+_pointer_ keys are unaffected by `label` -- they stay on the fixed `ProcessingState` taxonomy, since `monitor_job`'s
+internal bounded state lookups depend on enumerating a closed set.
 
 ## Library-only path
 
-For consumers who need custom logic the bundled handler can't express, the
-underlying functions are all directly importable: `monitor_job`,
-`resubmit_job`, `submit_job`, `JobDetails`, `JobContext`, `S3RecordStore`.
-Write your own Lambda handler and wire it up yourself.
+For consumers who need custom logic the bundled handler can't express, the underlying functions are all directly
+importable: `monitor_job`, `resubmit_job`, `submit_job`, `JobDetails`, `JobContext`, `S3RecordStore`. Write your own
+Lambda handler and wire it up yourself.
 
 ## Resubmitting jobs: `JobResubmitFunction`
 
-`JobResubmitFunction` bundles a generic default handler for the common
-case (same job queue/job definition every attempt) -- no consumer-authored
-Lambda code needed:
+`JobResubmitFunction` bundles a generic default handler for the common case (same job queue/job definition every
+attempt) -- no consumer-authored Lambda code needed:
 
 ```python
 from batch_event_job_monitor_cdk import JobResubmitFunction
@@ -158,11 +141,9 @@ JobResubmitFunction(
 )
 ```
 
-For per-attempt `containerOverrides`, a computed command, or
-`batch:DescribeJobs`-driven introspection of the original job, supply your
-own `entry`/`index` instead -- see
-[`docs/resubmitting-jobs.md`](docs/resubmitting-jobs.md) for the override
-path and a starting-point handler.
+For per-attempt `containerOverrides`, a computed command, or `batch:DescribeJobs`-driven introspection of the original
+job, supply your own `entry`/`index` instead -- see [`docs/resubmitting-jobs.md`](docs/resubmitting-jobs.md) for the
+override path and a starting-point handler.
 
 ## Origin
 
