@@ -594,6 +594,55 @@ class TestMonotonicityGuard:
         record = json.loads(resp["Body"].read())
         assert [e["state"] for e in record["events"]] == ["SUCCESS", "SUBMITTED"]
 
+    def test_straggler_for_superseded_attempt_does_not_resurrect_pointer(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        """A late event for an attempt a newer attempt has already
+        superseded (its own pointer already retired) must not write a new
+        pointer or fire SQS side effects for the dead attempt, even though
+        find_state_pointer at that attempt now returns None -- the same
+        signal a brand-new entity would give."""
+        kwargs: dict[str, Any] = dict(
+            log_store=store,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        context_1 = dataclasses.replace(CONTEXT, attempt=1)
+        context_2 = dataclasses.replace(CONTEXT, attempt=2)
+
+        spot_detail = make_detail(
+            status="FAILED", statusReason="Host EC2 instance terminated"
+        )
+        monitor_job(detail=make_detail(status="SUBMITTED"), context=context_1, **kwargs)
+        monitor_job(detail=spot_detail, context=context_1, **kwargs)
+        monitor_job(detail=make_detail(status="SUBMITTED"), context=context_2, **kwargs)
+        _receive_all(sqs, retry_queue_url)  # drain the attempt-1 retry message
+
+        result = monitor_job(detail=spot_detail, context=context_1, **kwargs)
+        assert result is ProcessingStates.FAILURE_RETRYABLE
+
+        assert store.find_state_pointer(context=context_1) is None
+        assert store.find_state_pointer(context=context_2) is ProcessingStates.SUBMITTED
+        assert _receive_all(sqs, retry_queue_url) == []
+
+        key = S3RecordStore.canonical_key(context_1)
+        resp = s3.get_object(Bucket=bucket, Key=key)
+        record = json.loads(resp["Body"].read())
+        assert [e["state"] for e in record["events"]] == [
+            "SUBMITTED",
+            "FAILURE_RETRYABLE",
+            "FAILURE_RETRYABLE",
+        ]
+
 
 class TestExitCodeOutcomeRouting:
     def test_nonretryable_outcome_skips_dlq_when_dlq_false(
@@ -723,7 +772,7 @@ class TestExitCodeOutcomeRouting:
     ) -> None:
         outcomes = (
             ExitCodeOutcomesBuilder()
-            .add(42, "TRANSIENT_TOOL_ERROR", retryable=True)
+            .add(42, "TRANSIENT_TOOL_ERROR", retryable=True, dlq=True)
             .build()
         )
         _seed_awaiting(store)

@@ -43,7 +43,7 @@ class TestProcessingState:
 
     def test_custom_state_from_outcome_is_not_baseline(self) -> None:
         """A custom outcome-derived state has its own name, not a baseline one."""
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         assert cloudy.name == "CLOUDY"
         assert cloudy != ProcessingStates.FAILURE_NONRETRYABLE
 
@@ -69,7 +69,7 @@ class TestRank:
         )
 
     def test_custom_terminal_state_ranks_like_builtin_terminal(self) -> None:
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         assert cloudy.rank == ProcessingStates.FAILURE_NONRETRYABLE.rank
 
 
@@ -168,12 +168,12 @@ class TestIsTerminal:
         assert ProcessingStates.FAILURE_RETRYABLE.is_terminal(5, policy_5)
 
     def test_custom_nonretryable_outcome_always_terminal(self) -> None:
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         assert cloudy.is_terminal(1, RetryPolicy(max_attempts=3))
 
     def test_custom_retryable_outcome_exhaustion_gated(self) -> None:
         transient = ExitCodeOutcome(
-            name="TRANSIENT", retryable=True
+            name="TRANSIENT", dlq=True, retryable=True
         ).to_processing_state()
         policy = RetryPolicy(max_attempts=3)
         assert not transient.is_terminal(1, policy)
@@ -382,10 +382,13 @@ class TestRetryMessage:
 
 
 class TestExitCodeOutcome:
-    def test_defaults(self) -> None:
-        outcome = ExitCodeOutcome(name="CLOUDY")
+    def test_retryable_defaults_false(self) -> None:
+        outcome = ExitCodeOutcome(name="CLOUDY", dlq=False)
         assert outcome.retryable is False
-        assert outcome.dlq is True
+
+    def test_dlq_is_required(self) -> None:
+        with pytest.raises(TypeError):
+            ExitCodeOutcome(name="CLOUDY")  # type: ignore[call-arg]
 
     def test_to_processing_state_nonretryable(self) -> None:
         state = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
@@ -394,18 +397,20 @@ class TestExitCodeOutcome:
         assert state.dlq is False
 
     def test_to_processing_state_retryable(self) -> None:
-        state = ExitCodeOutcome(name="TRANSIENT", retryable=True).to_processing_state()
+        state = ExitCodeOutcome(
+            name="TRANSIENT", dlq=True, retryable=True
+        ).to_processing_state()
         assert state.name == "TRANSIENT"
         assert state.retryable is True
 
 
 class TestExitCodeOutcomes:
     def test_get_returns_none_for_unmapped_exit_code(self) -> None:
-        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY")})
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY", dlq=False)})
         assert outcomes.get(1) is None
 
     def test_get_returns_none_for_none_exit_code(self) -> None:
-        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY")})
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY", dlq=False)})
         assert outcomes.get(None) is None
 
     def test_get_returns_mapped_outcome(self) -> None:
@@ -423,7 +428,7 @@ class TestExitCodeOutcomes:
             {
                 3: ExitCodeOutcome(name="LOW_SUN_ANGLE", dlq=False),
                 4: ExitCodeOutcome(name="CLOUDY", dlq=False),
-                42: ExitCodeOutcome(name="TRANSIENT", retryable=True),
+                42: ExitCodeOutcome(name="TRANSIENT", dlq=True, retryable=True),
             }
         )
         decoded = ExitCodeOutcomes.from_dict(outcomes.to_dict())
@@ -436,8 +441,8 @@ class TestExitCodeOutcomes:
     def test_states_includes_baseline_and_declared(self) -> None:
         outcomes = ExitCodeOutcomes(
             {
-                3: ExitCodeOutcome(name="LOW_SUN_ANGLE"),
-                4: ExitCodeOutcome(name="CLOUDY"),
+                3: ExitCodeOutcome(name="LOW_SUN_ANGLE", dlq=False),
+                4: ExitCodeOutcome(name="CLOUDY", dlq=False),
             }
         )
         names = {state.name for state in outcomes.states()}
@@ -454,8 +459,8 @@ class TestExitCodeOutcomes:
     def test_states_dedupes_same_name_across_exit_codes(self) -> None:
         outcomes = ExitCodeOutcomes(
             {
-                3: ExitCodeOutcome(name="CLOUDY"),
-                4: ExitCodeOutcome(name="CLOUDY"),
+                3: ExitCodeOutcome(name="CLOUDY", dlq=False),
+                4: ExitCodeOutcome(name="CLOUDY", dlq=False),
             }
         )
         names = [state.name for state in outcomes.states()]
@@ -475,7 +480,7 @@ class TestExitCodeOutcomes:
 class TestExitCodeOutcomesBuilder:
     def test_add_returns_self_for_chaining(self) -> None:
         builder = ExitCodeOutcomesBuilder()
-        assert builder.add(3, "LOW_SUN_ANGLE") is builder
+        assert builder.add(3, "LOW_SUN_ANGLE", dlq=False) is builder
 
     def test_build_produces_expected_mapping(self) -> None:
         outcomes = (
@@ -488,8 +493,13 @@ class TestExitCodeOutcomesBuilder:
         assert outcomes.get(4) == ExitCodeOutcome(name="CLOUDY", dlq=False)
 
     def test_add_overwrites_same_exit_code(self) -> None:
-        outcomes = ExitCodeOutcomesBuilder().add(3, "FIRST").add(3, "SECOND").build()
-        assert outcomes.get(3) == ExitCodeOutcome(name="SECOND")
+        outcomes = (
+            ExitCodeOutcomesBuilder()
+            .add(3, "FIRST", dlq=False)
+            .add(3, "SECOND", dlq=False)
+            .build()
+        )
+        assert outcomes.get(3) == ExitCodeOutcome(name="SECOND", dlq=False)
 
 
 class TestJobTypeConfig:

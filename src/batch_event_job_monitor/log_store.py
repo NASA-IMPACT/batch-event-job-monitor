@@ -433,7 +433,10 @@ class S3RecordStore:
             The (state, attempt) parsed from the active pointer's body, or
             None if the entity has no active pointer (a brand-new entity).
             If more than one hit is found, logs a warning and returns the
-            highest-ranked (then highest-attempt) hit as authoritative.
+            highest-attempt (then highest-ranked) hit as authoritative -- a
+            higher attempt number is always more current than a lower
+            attempt's pointer, even a terminal one left behind by a failed
+            delete (see write_state_pointer).
         """
         hits: list[tuple[ProcessingState, int]] = []
         for state in states:
@@ -458,7 +461,7 @@ class S3RecordStore:
                 input_entity_id,
                 hits,
             )
-        return max(hits, key=lambda hit: (hit[0].rank, hit[1]))
+        return max(hits, key=lambda hit: (hit[1], hit[0].rank))
 
     def next_attempt(
         self,

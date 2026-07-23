@@ -25,14 +25,17 @@ Path(_CUSTOM_ENTRY, "handler.py").write_text("def handler(event, context):\n    
 
 _BATCH_JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/queue"
 _BATCH_JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/def"
+_BATCH_JOB_DEFINITION_ARN_REVISION_7 = f"{_BATCH_JOB_DEFINITION_ARN}:7"
 
 
-def _make_refs(stack: Stack) -> tuple[batch.IJobQueue, batch.IJobDefinition]:
+def _make_refs(
+    stack: Stack, *, job_definition_arn: str = _BATCH_JOB_DEFINITION_ARN
+) -> tuple[batch.IJobQueue, batch.IJobDefinition]:
     job_queue = batch.JobQueue.from_job_queue_arn(
         stack, "JobQueue", _BATCH_JOB_QUEUE_ARN
     )
     job_definition = batch.EcsJobDefinition.from_job_definition_arn(
-        stack, "JobDefinition", _BATCH_JOB_DEFINITION_ARN
+        stack, "JobDefinition", job_definition_arn
     )
     return job_queue, job_definition
 
@@ -44,11 +47,12 @@ def _make_stack(
     entry: str | None = None,
     index: str | None = None,
     app_context: dict[str, object] | None = None,
+    job_definition_arn: str = _BATCH_JOB_DEFINITION_ARN,
 ) -> tuple[Stack, JobResubmitFunction]:
     app = App(context=app_context or {})
     stack = Stack(app, "TestStack")
     retry_queue = sqs.Queue(stack, "RetryQueue")
-    job_queue, job_definition = _make_refs(stack)
+    job_queue, job_definition = _make_refs(stack, job_definition_arn=job_definition_arn)
     construct = JobResubmitFunction(
         stack,
         "TestJobResubmitFunction",
@@ -170,7 +174,7 @@ class TestIamGrants:
                                     "Resource": Match.array_with(
                                         [
                                             _BATCH_JOB_QUEUE_ARN,
-                                            _BATCH_JOB_DEFINITION_ARN,
+                                            f"{_BATCH_JOB_DEFINITION_ARN}:*",
                                         ]
                                     ),
                                 }
@@ -196,6 +200,49 @@ class TestIamGrants:
         ]
         assert "batch:DescribeJobs" not in actions
         assert "batch:SubmitJob" in actions
+
+
+class TestJobDefinitionRevision:
+    """A revision-pinned IJobDefinition must not pin resubmissions to that
+    revision -- Batch resolves a family ARN (no revision) to whichever
+    revision is currently ACTIVE, so resubmissions pick up new revisions
+    without redeploying this construct."""
+
+    def test_revision_stripped_from_env_var(self) -> None:
+        stack, _ = _make_stack(job_definition_arn=_BATCH_JOB_DEFINITION_ARN_REVISION_7)
+        template = Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": Match.object_like(
+                        {"BATCH_JOB_DEFINITION_ARN": _BATCH_JOB_DEFINITION_ARN}
+                    )
+                }
+            },
+        )
+
+    def test_revision_replaced_with_wildcard_in_iam_resource(self) -> None:
+        stack, _ = _make_stack(job_definition_arn=_BATCH_JOB_DEFINITION_ARN_REVISION_7)
+        template = Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Resource": Match.array_with(
+                                        [f"{_BATCH_JOB_DEFINITION_ARN}:*"]
+                                    ),
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
 
 
 class TestEventSource:

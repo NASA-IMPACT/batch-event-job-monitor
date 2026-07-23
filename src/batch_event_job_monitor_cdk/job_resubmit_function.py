@@ -41,6 +41,18 @@ _HANDLER_EXCLUDE = [
 _DEFAULT_HANDLER_PATH = "batch_event_job_monitor.handlers.job_resubmit_handler.handler"
 
 
+def _job_definition_family_arn(job_definition: batch.IJobDefinition) -> str:
+    """job_definition's ARN with any revision suffix stripped.
+
+    Batch resolves a family ARN (no revision) to whichever revision is
+    currently ACTIVE, so resubmissions automatically pick up a new revision
+    without redeploying this construct.
+    """
+    arn = job_definition.job_definition_arn
+    prefix, _, suffix = arn.rpartition(":")
+    return prefix if suffix.isdigit() else arn
+
+
 class JobResubmitFunction(Construct):
     """AWS Batch job-resubmit Lambda, triggered by the retry queue.
 
@@ -60,9 +72,12 @@ class JobResubmitFunction(Construct):
         default handler's BATCH_JOB_QUEUE_ARN env var and to scope the
         batch:SubmitJob IAM grant.
     job_definition : batch.IJobDefinition
-        The AWS Batch job definition jobs are resubmitted with. Used for
-        the default handler's BATCH_JOB_DEFINITION_ARN env var and to
-        scope the batch:SubmitJob IAM grant.
+        The AWS Batch job definition jobs are resubmitted with. Its
+        revision suffix, if any, is stripped before use -- resubmissions
+        target the family ARN, so a new revision is picked up automatically
+        without redeploying this construct. Used for the default handler's
+        BATCH_JOB_DEFINITION_ARN env var and to scope the batch:SubmitJob
+        IAM grant.
     retry_queue : sqs.IQueue
         The retry queue monitor_job publishes to; this Lambda's event
         source.
@@ -136,9 +151,11 @@ class JobResubmitFunction(Construct):
                 "the bundled default handler)"
             )
 
+        job_definition_family_arn = _job_definition_family_arn(job_definition)
+
         full_environment = {
             "BATCH_JOB_QUEUE_ARN": job_queue.job_queue_arn,
-            "BATCH_JOB_DEFINITION_ARN": job_definition.job_definition_arn,
+            "BATCH_JOB_DEFINITION_ARN": job_definition_family_arn,
             **(environment or {}),
         }
 
@@ -176,7 +193,10 @@ class JobResubmitFunction(Construct):
         self.function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=actions,
-                resources=[job_queue.job_queue_arn, job_definition.job_definition_arn],
+                resources=[
+                    job_queue.job_queue_arn,
+                    f"{job_definition_family_arn}:*",
+                ],
             )
         )
 

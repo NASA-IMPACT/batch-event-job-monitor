@@ -218,7 +218,7 @@ class TestOutputIndex:
         self, store: S3RecordStore, s3: S3Client
     ) -> None:
         context = make_context()
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         store.write_output_index(context=context, state=cloudy)
         key = S3RecordStore.output_index_key(cloudy, context)
         assert "state=CLOUDY/" in key
@@ -327,13 +327,13 @@ class TestFindStatePointer:
         """A pointer written in a custom state is invisible to the default
         (baseline-only) scan -- states must be passed explicitly."""
         context = make_context()
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         store.write_state_pointer(context=context, new_state=cloudy, old_state=None)
         assert store.find_state_pointer(context=context) is None
 
     def test_found_when_custom_states_passed(self, store: S3RecordStore) -> None:
         context = make_context()
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         store.write_state_pointer(context=context, new_state=cloudy, old_state=None)
         result = store.find_state_pointer(
             context=context, states=(*BASELINE_PROCESSING_STATES, cloudy)
@@ -396,10 +396,33 @@ class TestFindActivePointer:
         )
         assert result == (ProcessingStates.FAILURE_RETRYABLE, 2)
 
+    def test_multiple_hits_prefers_higher_attempt_over_higher_rank(
+        self, store: S3RecordStore
+    ) -> None:
+        """A stale terminal pointer left behind by a failed delete (see
+        write_state_pointer) must not outrank a genuinely active, later
+        attempt just because its state ranks higher."""
+        store.write_state_pointer(
+            context=make_context(attempt=1),
+            new_state=ProcessingStates.FAILURE_NONRETRYABLE,
+            old_state=None,
+        )
+        store.write_state_pointer(
+            context=make_context(attempt=2),
+            new_state=ProcessingStates.AWAITING,
+            old_state=None,
+        )
+        result = store.find_active_pointer(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+        )
+        assert result == (ProcessingStates.AWAITING, 2)
+
     def test_custom_state_found_only_when_states_passed(
         self, store: S3RecordStore
     ) -> None:
-        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         store.write_state_pointer(
             context=make_context(attempt=3), new_state=cloudy, old_state=None
         )

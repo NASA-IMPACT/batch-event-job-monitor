@@ -176,7 +176,7 @@ class TestClassifyExitCodeOutcomes:
     def test_retryable_outcome_produces_retryable_named_state(self) -> None:
         outcomes = (
             ExitCodeOutcomesBuilder()
-            .add(42, "TRANSIENT_TOOL_ERROR", retryable=True)
+            .add(42, "TRANSIENT_TOOL_ERROR", retryable=True, dlq=True)
             .build()
         )
         job_details = JobDetails.from_event(self._detail(exit_code=42))
@@ -184,13 +184,8 @@ class TestClassifyExitCodeOutcomes:
         assert state.name == "TRANSIENT_TOOL_ERROR"
         assert state.retryable is True
 
-    def test_dlq_defaults_true(self) -> None:
-        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY").build()
-        job_details = JobDetails.from_event(self._detail(exit_code=4))
-        assert job_details.classify(RetryPolicy(), outcomes).dlq is True
-
     def test_unmapped_exit_code_falls_back_to_default_classification(self) -> None:
-        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY").build()
+        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY", dlq=False).build()
         job_details = JobDetails.from_event(self._detail(exit_code=1))
         state = job_details.classify(RetryPolicy(), outcomes)
         assert state == ProcessingStates.FAILURE_NONRETRYABLE
@@ -203,7 +198,7 @@ class TestClassifyExitCodeOutcomes:
     def test_spot_interruption_fallback_still_applies_when_no_outcome_matches(
         self,
     ) -> None:
-        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY").build()
+        outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY", dlq=False).build()
         job_details = JobDetails.from_event(
             self._detail(
                 exit_code=137,

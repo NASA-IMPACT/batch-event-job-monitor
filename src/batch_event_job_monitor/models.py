@@ -203,22 +203,25 @@ class JobContext:
 class ExitCodeOutcome:
     """A named outcome for one Batch container exit code.
 
-    `name` becomes this outcome's ProcessingState name -- used directly in
-    the state-pointer/output-index keys and the canonical record, the same
-    way SUCCESS/FAILURE_RETRYABLE/FAILURE_NONRETRYABLE are for the
-    built-in states.
-
-    `retryable` determines whether this outcome's terminality is
-    exhaustion-gated (like FAILURE_RETRYABLE) or immediate (like
-    FAILURE_NONRETRYABLE).
-
-    `dlq` determines whether a terminal instance of this outcome should
-    route to the dead-letter queue.
+    Attributes
+    ----------
+    name : str
+        Becomes this outcome's ProcessingState name -- used directly in
+        the state-pointer/output-index keys and the canonical record, the
+        same way SUCCESS/FAILURE_RETRYABLE/FAILURE_NONRETRYABLE are for
+        the built-in states.
+    dlq : bool
+        Whether a terminal instance of this outcome should route to the
+        dead-letter queue.
+    retryable : bool, optional
+        Whether this outcome's terminality is exhaustion-gated (like
+        FAILURE_RETRYABLE) or immediate (like FAILURE_NONRETRYABLE).
+        Defaults to False.
     """
 
     name: str
+    dlq: bool
     retryable: bool = False
-    dlq: bool = True
 
     def to_processing_state(self) -> ProcessingState:
         """This outcome as a ProcessingState."""
@@ -294,8 +297,8 @@ class ExitCodeOutcomesBuilder:
         exit_code: int,
         name: str,
         *,
+        dlq: bool,
         retryable: bool = False,
-        dlq: bool = True,
     ) -> ExitCodeOutcomesBuilder:
         """Map exit_code to a new ExitCodeOutcome. Returns self for chaining."""
         self.outcomes[exit_code] = ExitCodeOutcome(

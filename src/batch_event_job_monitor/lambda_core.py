@@ -95,8 +95,9 @@ def monitor_job(
 
     old_state = log_store.find_state_pointer(context=context, states=states)
     old_attempt = context.attempt
+    stale = False
 
-    if old_state is None and new_state == ProcessingStates.SUBMITTED:
+    if old_state is None:
         active = log_store.find_active_pointer(
             job_type=context.job_type,
             partition_fields=context.partition_fields,
@@ -104,7 +105,14 @@ def monitor_job(
             states=states,
         )
         if active is not None:
-            old_state, old_attempt = active
+            active_state, active_attempt = active
+            if active_attempt > context.attempt:
+                # A straggler for an attempt a newer one has already
+                # superseded (that attempt's own pointer has since been
+                # retired, so find_state_pointer above found nothing).
+                stale = True
+            else:
+                old_state, old_attempt = active_state, active_attempt
 
     event = ProcessingEventRecord(
         state=new_state.name,
@@ -112,24 +120,22 @@ def monitor_job(
         batch_job_id=job.job_id,
         exit_code=job.exit_code,
     )
+    log_store.append_canonical_event(
+        context=context, event=event, batch_job_id=job.job_id
+    )
 
-    # Monotonicity guard (same attempt only): EventBridge does not guarantee
-    # delivery order, so a same-attempt event ranked below the already
-    # recorded state is stale. Still append it for audit history, but skip
-    # the pointer/output-index/SQS side effects.
-    if (
+    # Monotonicity guard: EventBridge does not guarantee delivery order, so
+    # a stale/out-of-order event is possible two ways -- a straggler for an
+    # already-superseded attempt (checked above), or a same-attempt event
+    # ranked below the state already recorded for this attempt. Either way,
+    # the canonical event above still records it for audit history, but the
+    # pointer/output-index/SQS side effects are skipped.
+    if stale or (
         old_attempt == context.attempt
         and old_state is not None
         and new_state.rank < old_state.rank
     ):
-        log_store.append_canonical_event(
-            context=context, event=event, batch_job_id=job.job_id
-        )
         return new_state
-
-    log_store.append_canonical_event(
-        context=context, event=event, batch_job_id=job.job_id
-    )
 
     # Skip the redundant pointer rewrite when nothing changed (e.g.
     # PENDING -> RUNNABLE -> STARTING -> RUNNING all map to AWAITING).
