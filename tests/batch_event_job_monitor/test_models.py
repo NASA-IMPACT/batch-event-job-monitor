@@ -1,10 +1,8 @@
-import enum
 import json
 
 import pytest
 
 from batch_event_job_monitor.models import (
-    Classification,
     ExitCodeOutcome,
     ExitCodeOutcomes,
     ExitCodeOutcomesBuilder,
@@ -18,28 +16,36 @@ from batch_event_job_monitor.models import (
 
 
 class TestProcessingState:
-    """Tests for ProcessingState enum."""
+    """Tests for the built-in ProcessingState instances."""
 
     def test_processing_state_members(self) -> None:
-        """Test that all required members exist."""
+        """Test that all built-in states exist."""
         assert hasattr(ProcessingState, "SUBMITTED")
         assert hasattr(ProcessingState, "AWAITING")
         assert hasattr(ProcessingState, "SUCCESS")
         assert hasattr(ProcessingState, "FAILURE_RETRYABLE")
         assert hasattr(ProcessingState, "FAILURE_NONRETRYABLE")
 
-    def test_processing_state_is_string_enum(self) -> None:
-        """Test that ProcessingState is a string enum."""
-        assert issubclass(ProcessingState, str)
-        assert issubclass(ProcessingState, enum.Enum)
+    def test_processing_state_names(self) -> None:
+        """Test that built-in ProcessingState names are correct strings."""
+        assert ProcessingState.SUBMITTED.name == "SUBMITTED"
+        assert ProcessingState.AWAITING.name == "AWAITING"
+        assert ProcessingState.SUCCESS.name == "SUCCESS"
+        assert ProcessingState.FAILURE_RETRYABLE.name == "FAILURE_RETRYABLE"
+        assert ProcessingState.FAILURE_NONRETRYABLE.name == "FAILURE_NONRETRYABLE"
 
-    def test_processing_state_values(self) -> None:
-        """Test that ProcessingState values are correct strings."""
-        assert ProcessingState.SUBMITTED.value == "SUBMITTED"
-        assert ProcessingState.AWAITING.value == "AWAITING"
-        assert ProcessingState.SUCCESS.value == "SUCCESS"
-        assert ProcessingState.FAILURE_RETRYABLE.value == "FAILURE_RETRYABLE"
-        assert ProcessingState.FAILURE_NONRETRYABLE.value == "FAILURE_NONRETRYABLE"
+    def test_only_failure_retryable_is_retryable(self) -> None:
+        assert ProcessingState.FAILURE_RETRYABLE.retryable is True
+        assert ProcessingState.SUBMITTED.retryable is False
+        assert ProcessingState.AWAITING.retryable is False
+        assert ProcessingState.SUCCESS.retryable is False
+        assert ProcessingState.FAILURE_NONRETRYABLE.retryable is False
+
+    def test_custom_state_from_outcome_is_not_baseline(self) -> None:
+        """A custom outcome-derived state has its own name, not a baseline one."""
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        assert cloudy.name == "CLOUDY"
+        assert cloudy != ProcessingState.FAILURE_NONRETRYABLE
 
 
 class TestRank:
@@ -59,6 +65,10 @@ class TestRank:
             == ProcessingState.FAILURE_RETRYABLE.rank
             == ProcessingState.FAILURE_NONRETRYABLE.rank
         )
+
+    def test_custom_terminal_state_ranks_like_builtin_terminal(self) -> None:
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        assert cloudy.rank == ProcessingState.FAILURE_NONRETRYABLE.rank
 
 
 class TestRetryPolicy:
@@ -154,6 +164,18 @@ class TestIsTerminal:
 
         assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(4, policy_5)
         assert ProcessingState.FAILURE_RETRYABLE.is_terminal(5, policy_5)
+
+    def test_custom_nonretryable_outcome_always_terminal(self) -> None:
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        assert cloudy.is_terminal(1, RetryPolicy(max_attempts=3))
+
+    def test_custom_retryable_outcome_exhaustion_gated(self) -> None:
+        transient = ExitCodeOutcome(
+            name="TRANSIENT", retryable=True
+        ).to_processing_state()
+        policy = RetryPolicy(max_attempts=3)
+        assert not transient.is_terminal(1, policy)
+        assert transient.is_terminal(3, policy)
 
 
 class TestProcessingEventRecord:
@@ -322,12 +344,16 @@ class TestRetryMessage:
 
     def test_from_context_round_trips_to_context(self) -> None:
         context = self._context()
-        message = RetryMessage.from_context(context, batch_job_id="batch-123")
+        message = RetryMessage.from_context(
+            context, batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+        )
         assert message.context == context
         assert message.batch_job_id == "batch-123"
 
     def test_to_json_is_flat(self) -> None:
-        message = RetryMessage.from_context(self._context(), batch_job_id="batch-123")
+        message = RetryMessage.from_context(
+            self._context(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+        )
         body = json.loads(message.to_json())
         assert body == {
             "job_type": "monthly-composite",
@@ -336,46 +362,52 @@ class TestRetryMessage:
             "output_entity_id": "12TVK_2024-06_output",
             "attempt": 1,
             "batch_job_id": "batch-123",
-            "label": None,
+            "state": "FAILURE_RETRYABLE",
         }
 
     def test_from_json_round_trips(self) -> None:
-        message = RetryMessage.from_context(self._context(), batch_job_id="batch-123")
+        message = RetryMessage.from_context(
+            self._context(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+        )
         assert RetryMessage.from_json(message.to_json()) == message
 
-    def test_label_round_trips(self) -> None:
+    def test_state_round_trips(self) -> None:
         message = RetryMessage.from_context(
-            self._context(), batch_job_id="batch-123", label="CLOUDY"
+            self._context(), batch_job_id="batch-123", state="CLOUDY"
         )
-        assert message.label == "CLOUDY"
-        assert RetryMessage.from_json(message.to_json()).label == "CLOUDY"
-
-
-class TestClassification:
-    def test_defaults(self) -> None:
-        classification = Classification(state=ProcessingState.SUCCESS)
-        assert classification.label is None
-        assert classification.dlq is True
+        assert message.state == "CLOUDY"
+        assert RetryMessage.from_json(message.to_json()).state == "CLOUDY"
 
 
 class TestExitCodeOutcome:
     def test_defaults(self) -> None:
-        outcome = ExitCodeOutcome(label="CLOUDY")
+        outcome = ExitCodeOutcome(name="CLOUDY")
         assert outcome.retryable is False
         assert outcome.dlq is True
+
+    def test_to_processing_state_nonretryable(self) -> None:
+        state = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
+        assert state.name == "CLOUDY"
+        assert state.retryable is False
+        assert state.dlq is False
+
+    def test_to_processing_state_retryable(self) -> None:
+        state = ExitCodeOutcome(name="TRANSIENT", retryable=True).to_processing_state()
+        assert state.name == "TRANSIENT"
+        assert state.retryable is True
 
 
 class TestExitCodeOutcomes:
     def test_get_returns_none_for_unmapped_exit_code(self) -> None:
-        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(label="CLOUDY")})
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY")})
         assert outcomes.get(1) is None
 
     def test_get_returns_none_for_none_exit_code(self) -> None:
-        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(label="CLOUDY")})
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY")})
         assert outcomes.get(None) is None
 
     def test_get_returns_mapped_outcome(self) -> None:
-        outcome = ExitCodeOutcome(label="CLOUDY", dlq=False)
+        outcome = ExitCodeOutcome(name="CLOUDY", dlq=False)
         outcomes = ExitCodeOutcomes({4: outcome})
         assert outcomes.get(4) == outcome
 
@@ -387,17 +419,55 @@ class TestExitCodeOutcomes:
     def test_to_dict_from_dict_round_trips(self) -> None:
         outcomes = ExitCodeOutcomes(
             {
-                3: ExitCodeOutcome(label="LOW_SUN_ANGLE", dlq=False),
-                4: ExitCodeOutcome(label="CLOUDY", dlq=False),
-                42: ExitCodeOutcome(label="TRANSIENT", retryable=True),
+                3: ExitCodeOutcome(name="LOW_SUN_ANGLE", dlq=False),
+                4: ExitCodeOutcome(name="CLOUDY", dlq=False),
+                42: ExitCodeOutcome(name="TRANSIENT", retryable=True),
             }
         )
         decoded = ExitCodeOutcomes.from_dict(outcomes.to_dict())
         assert decoded == outcomes
 
     def test_to_dict_is_json_serializable(self) -> None:
-        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(label="CLOUDY", dlq=False)})
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY", dlq=False)})
         assert json.loads(json.dumps(outcomes.to_dict())) == outcomes.to_dict()
+
+    def test_states_includes_baseline_and_declared(self) -> None:
+        outcomes = ExitCodeOutcomes(
+            {
+                3: ExitCodeOutcome(name="LOW_SUN_ANGLE"),
+                4: ExitCodeOutcome(name="CLOUDY"),
+            }
+        )
+        names = {state.name for state in outcomes.states()}
+        assert names == {
+            "SUBMITTED",
+            "AWAITING",
+            "SUCCESS",
+            "FAILURE_RETRYABLE",
+            "FAILURE_NONRETRYABLE",
+            "LOW_SUN_ANGLE",
+            "CLOUDY",
+        }
+
+    def test_states_dedupes_same_name_across_exit_codes(self) -> None:
+        outcomes = ExitCodeOutcomes(
+            {
+                3: ExitCodeOutcome(name="CLOUDY"),
+                4: ExitCodeOutcome(name="CLOUDY"),
+            }
+        )
+        names = [state.name for state in outcomes.states()]
+        assert names.count("CLOUDY") == 1
+
+    def test_states_empty_mapping_is_just_baseline(self) -> None:
+        names = {state.name for state in ExitCodeOutcomes().states()}
+        assert names == {
+            "SUBMITTED",
+            "AWAITING",
+            "SUCCESS",
+            "FAILURE_RETRYABLE",
+            "FAILURE_NONRETRYABLE",
+        }
 
 
 class TestExitCodeOutcomesBuilder:
@@ -412,12 +482,12 @@ class TestExitCodeOutcomesBuilder:
             .add(4, "CLOUDY", dlq=False)
             .build()
         )
-        assert outcomes.get(3) == ExitCodeOutcome(label="LOW_SUN_ANGLE", dlq=False)
-        assert outcomes.get(4) == ExitCodeOutcome(label="CLOUDY", dlq=False)
+        assert outcomes.get(3) == ExitCodeOutcome(name="LOW_SUN_ANGLE", dlq=False)
+        assert outcomes.get(4) == ExitCodeOutcome(name="CLOUDY", dlq=False)
 
     def test_add_overwrites_same_exit_code(self) -> None:
         outcomes = ExitCodeOutcomesBuilder().add(3, "FIRST").add(3, "SECOND").build()
-        assert outcomes.get(3) == ExitCodeOutcome(label="SECOND")
+        assert outcomes.get(3) == ExitCodeOutcome(name="SECOND")
 
 
 class TestJobTypeConfig:
@@ -430,7 +500,7 @@ class TestJobTypeConfig:
         config = JobTypeConfig(
             retry_policy=RetryPolicy(max_attempts=5),
             exit_code_outcomes=ExitCodeOutcomes(
-                {4: ExitCodeOutcome(label="CLOUDY", dlq=False)}
+                {4: ExitCodeOutcome(name="CLOUDY", dlq=False)}
             ),
         )
         assert JobTypeConfig.from_dict(config.to_dict()) == config
@@ -441,7 +511,7 @@ class TestJobTypeConfig:
     def test_to_dict_is_json_serializable(self) -> None:
         config = JobTypeConfig(
             exit_code_outcomes=ExitCodeOutcomes(
-                {4: ExitCodeOutcome(label="CLOUDY", dlq=False)}
+                {4: ExitCodeOutcome(name="CLOUDY", dlq=False)}
             )
         )
         assert json.loads(json.dumps(config.to_dict())) == config.to_dict()

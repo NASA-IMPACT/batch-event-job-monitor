@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from batch_event_job_monitor.models import (
-    Classification,
     ExitCodeOutcomes,
     JobContext,
     ProcessingState,
@@ -94,7 +93,7 @@ class JobDetails:
         self,
         retry_policy: RetryPolicy,
         exit_code_outcomes: ExitCodeOutcomes | None = None,
-    ) -> Classification:
+    ) -> ProcessingState:
         """Classify this job's status.
 
         Called for every aws.batch job state change event, not only
@@ -110,34 +109,30 @@ class JobDetails:
             JobTypeConfig) -- resolved by the caller, not read from this
             job's own Batch parameters, since it's container/image-tied
             configuration, not per-job data. Checked first for a FAILED
-            status; falls back to the spot-interruption-prefix check when
-            no outcome matches this job's exit code.
+            status, producing that outcome's own named ProcessingState;
+            falls back to the spot-interruption-prefix check when no
+            outcome matches this job's exit code.
         """
         if self.status == "SUBMITTED":
-            return Classification(state=ProcessingState.SUBMITTED)
+            return ProcessingState.SUBMITTED
 
         if self.status in _AWAITING_STATUSES:
-            return Classification(state=ProcessingState.AWAITING)
+            return ProcessingState.AWAITING
 
         if self.status == "SUCCEEDED":
-            return Classification(state=ProcessingState.SUCCESS)
+            return ProcessingState.SUCCESS
 
         if self.status == "FAILED":
             outcome = (exit_code_outcomes or ExitCodeOutcomes()).get(self.exit_code)
             if outcome is not None:
-                state = (
-                    ProcessingState.FAILURE_RETRYABLE
-                    if outcome.retryable
-                    else ProcessingState.FAILURE_NONRETRYABLE
-                )
-                return Classification(state=state, label=outcome.label, dlq=outcome.dlq)
+                return outcome.to_processing_state()
 
             status_reason = self.status_reason or ""
             if status_reason.startswith(
                 retry_policy.spot_interruption_status_reason_prefixes
             ):
-                return Classification(state=ProcessingState.FAILURE_RETRYABLE)
-            return Classification(state=ProcessingState.FAILURE_NONRETRYABLE)
+                return ProcessingState.FAILURE_RETRYABLE
+            return ProcessingState.FAILURE_NONRETRYABLE
 
         raise ValueError(f"Unrecognized job status: {self.status!r}")
 

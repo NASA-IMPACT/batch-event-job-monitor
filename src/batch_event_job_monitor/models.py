@@ -3,35 +3,66 @@ from __future__ import annotations
 import enum
 import json
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any
-
-# Ranks a same-attempt transition against the previously recorded state, so
-# an out-of-order/stale event (EventBridge does not guarantee delivery
-# order) can be detected: a new state ranking lower than the recorded one is
-# stale. Terminal states tie -- nothing supersedes a terminal outcome within
-# the same attempt.
-_RANK = {
-    "SUBMITTED": 0,
-    "AWAITING": 1,
-    "SUCCESS": 2,
-    "FAILURE_RETRYABLE": 2,
-    "FAILURE_NONRETRYABLE": 2,
-}
+from typing import Any, ClassVar
 
 
-class ProcessingState(str, enum.Enum):
-    """State of a processing job."""
+class _Kind(enum.Enum):
+    """Internal lifecycle/routing archetype a ProcessingState behaves as.
 
-    SUBMITTED = "SUBMITTED"
-    AWAITING = "AWAITING"
-    SUCCESS = "SUCCESS"
-    FAILURE_RETRYABLE = "FAILURE_RETRYABLE"
-    FAILURE_NONRETRYABLE = "FAILURE_NONRETRYABLE"
+    Not exposed publicly -- consumers describe custom terminal outcomes via
+    ExitCodeOutcome.retryable/.dlq, never by constructing a ProcessingState
+    or picking a _Kind directly.
+    """
+
+    SUBMITTED = enum.auto()
+    AWAITING = enum.auto()
+    SUCCESS = enum.auto()
+    RETRYABLE_FAILURE = enum.auto()
+    NONRETRYABLE_FAILURE = enum.auto()
+
+
+@dataclass(frozen=True)
+class ProcessingState:
+    """A job's processing state.
+
+    Not a closed enum. SUBMITTED/AWAITING/SUCCESS/FAILURE_RETRYABLE/
+    FAILURE_NONRETRYABLE are provided below as module-level instances for
+    the built-in lifecycle, but a job_type's ExitCodeOutcomes can produce
+    additional named terminal states (e.g. "CLOUDY") that behave like
+    FAILURE_RETRYABLE or FAILURE_NONRETRYABLE for routing/terminality
+    purposes while using their own name in the S3 key and canonical
+    record, the same way SUCCESS/FAILURE_RETRYABLE/FAILURE_NONRETRYABLE do.
+
+    This name-carries-meaning design is why job classification stays
+    data-driven (see ExitCodeOutcome) rather than requiring a Python
+    callback: a new terminal outcome is just a new entry in a job_type's
+    exit-code table, not a new ProcessingState member to ship a code change
+    for.
+    """
+
+    name: str
+    kind: _Kind
+    dlq: bool = True
+
+    SUBMITTED: ClassVar[ProcessingState]
+    AWAITING: ClassVar[ProcessingState]
+    SUCCESS: ClassVar[ProcessingState]
+    FAILURE_RETRYABLE: ClassVar[ProcessingState]
+    FAILURE_NONRETRYABLE: ClassVar[ProcessingState]
+
+    @property
+    def retryable(self) -> bool:
+        """True if this state's terminality depends on attempt exhaustion."""
+        return self.kind is _Kind.RETRYABLE_FAILURE
 
     @property
     def rank(self) -> int:
         """Lifecycle rank, for detecting out-of-order/stale transitions."""
-        return _RANK[self.value]
+        if self.kind is _Kind.SUBMITTED:
+            return 0
+        if self.kind is _Kind.AWAITING:
+            return 1
+        return 2
 
     def is_terminal(self, attempt: int, retry_policy: RetryPolicy) -> bool:
         """Determine if this state is terminal.
@@ -48,11 +79,34 @@ class ProcessingState(str, enum.Enum):
         bool
             True if the state is terminal, False otherwise.
         """
-        if self in (ProcessingState.SUCCESS, ProcessingState.FAILURE_NONRETRYABLE):
-            return True
-        if self == ProcessingState.FAILURE_RETRYABLE:
+        if self.kind in (_Kind.SUBMITTED, _Kind.AWAITING):
+            return False
+        if self.kind is _Kind.RETRYABLE_FAILURE:
             return attempt >= retry_policy.max_attempts
-        return False
+        return True
+
+
+ProcessingState.SUBMITTED = ProcessingState(name="SUBMITTED", kind=_Kind.SUBMITTED)
+ProcessingState.AWAITING = ProcessingState(name="AWAITING", kind=_Kind.AWAITING)
+ProcessingState.SUCCESS = ProcessingState(name="SUCCESS", kind=_Kind.SUCCESS)
+ProcessingState.FAILURE_RETRYABLE = ProcessingState(
+    name="FAILURE_RETRYABLE", kind=_Kind.RETRYABLE_FAILURE
+)
+ProcessingState.FAILURE_NONRETRYABLE = ProcessingState(
+    name="FAILURE_NONRETRYABLE", kind=_Kind.NONRETRYABLE_FAILURE
+)
+
+# The bounded set of states a job_type with no custom ExitCodeOutcomes can
+# produce. S3RecordStore's lookup methods scan over this by default; pass
+# ExitCodeOutcomes.states() instead for a job_type that declares custom
+# terminal outcomes, so pointers in those states are found too.
+BASELINE_PROCESSING_STATES: tuple[ProcessingState, ...] = (
+    ProcessingState.SUBMITTED,
+    ProcessingState.AWAITING,
+    ProcessingState.SUCCESS,
+    ProcessingState.FAILURE_RETRYABLE,
+    ProcessingState.FAILURE_NONRETRYABLE,
+)
 
 
 @dataclass(frozen=True)
@@ -82,24 +136,6 @@ class RetryPolicy:
                 data["spot_interruption_status_reason_prefixes"]
             )
         return cls(**kwargs)
-
-
-@dataclass(frozen=True)
-class Classification:
-    """The outcome of classifying a job's status.
-
-    `state` drives all routing/storage mechanics (rank, terminality, S3 key
-    building) and is always one of the fixed ProcessingState members.
-
-    `label` and `dlq` carry consumer-defined, open-ended routing detail
-    (e.g. distinguishing a data-driven "skip" outcome like a cloud-cover
-    screen from a genuine bug) without requiring ProcessingState itself to
-    grow new members per job type. See ExitCodeOutcome.
-    """
-
-    state: ProcessingState
-    label: str | None = None
-    dlq: bool = True
 
 
 _PARAM_PREFIX = "bejm_"
@@ -164,19 +200,27 @@ class JobContext:
 class ExitCodeOutcome:
     """A named outcome for one Batch container exit code.
 
-    `retryable` determines which ProcessingState this outcome classifies
-    into (FAILURE_RETRYABLE vs FAILURE_NONRETRYABLE).
+    `name` becomes this outcome's ProcessingState name -- used directly in
+    the state-pointer/output-index keys and the canonical record, the same
+    way SUCCESS/FAILURE_RETRYABLE/FAILURE_NONRETRYABLE are for the
+    built-in states.
+
+    `retryable` determines whether this outcome's terminality is
+    exhaustion-gated (like FAILURE_RETRYABLE) or immediate (like
+    FAILURE_NONRETRYABLE).
 
     `dlq` determines whether a terminal instance of this outcome should
     route to the dead-letter queue.
-
-    `label` is descriptive only -- it never affects routing, only the
-    output-index key and canonical event.
     """
 
-    label: str
+    name: str
     retryable: bool = False
     dlq: bool = True
+
+    def to_processing_state(self) -> ProcessingState:
+        """This outcome as a ProcessingState."""
+        kind = _Kind.RETRYABLE_FAILURE if self.retryable else _Kind.NONRETRYABLE_FAILURE
+        return ProcessingState(name=self.name, kind=kind, dlq=self.dlq)
 
 
 @dataclass(frozen=True)
@@ -195,11 +239,25 @@ class ExitCodeOutcomes:
         """The outcome for exit_code, or None if unmapped or exit_code is None."""
         return None if exit_code is None else self.by_exit_code.get(exit_code)
 
+    def states(self) -> tuple[ProcessingState, ...]:
+        """The bounded set of ProcessingStates this job_type can produce.
+
+        Baseline lifecycle states plus one ProcessingState per distinct
+        declared outcome name (exit codes sharing a name collapse to one
+        state). Pass to S3RecordStore's lookup methods so they scan for a
+        job_type's full set of possible pointers, not just the five
+        built-in states.
+        """
+        declared: dict[str, ProcessingState] = {}
+        for outcome in self.by_exit_code.values():
+            declared[outcome.name] = outcome.to_processing_state()
+        return BASELINE_PROCESSING_STATES + tuple(declared.values())
+
     def to_dict(self) -> dict[str, Any]:
         """Encode for embedding in JobTypeConfig's deploy-time JSON."""
         return {
             str(code): {
-                "label": outcome.label,
+                "name": outcome.name,
                 "retryable": outcome.retryable,
                 "dlq": outcome.dlq,
             }
@@ -231,14 +289,14 @@ class ExitCodeOutcomesBuilder:
     def add(
         self,
         exit_code: int,
-        label: str,
+        name: str,
         *,
         retryable: bool = False,
         dlq: bool = True,
     ) -> ExitCodeOutcomesBuilder:
         """Map exit_code to a new ExitCodeOutcome. Returns self for chaining."""
         self.outcomes[exit_code] = ExitCodeOutcome(
-            label=label, retryable=retryable, dlq=dlq
+            name=name, retryable=retryable, dlq=dlq
         )
         return self
 
@@ -288,10 +346,10 @@ class JobTypeConfig:
 class RetryMessage:
     """SQS message body for the retry queue / DLQ.
 
-    Fields are flat (mirroring JobContext's own fields plus batch_job_id)
-    rather than nesting a `context: JobContext` field, so the JSON wire
-    format stays a single flat object instead of nesting `context` under
-    its own key.
+    Fields are flat (mirroring JobContext's own fields plus batch_job_id
+    and state) rather than nesting a `context: JobContext` field, so the
+    JSON wire format stays a single flat object instead of nesting
+    `context` under its own key.
     """
 
     job_type: str
@@ -300,14 +358,14 @@ class RetryMessage:
     output_entity_id: str
     attempt: int
     batch_job_id: str
-    label: str | None = None
+    state: str
 
     @classmethod
     def from_context(
-        cls, context: JobContext, *, batch_job_id: str, label: str | None = None
+        cls, context: JobContext, *, batch_job_id: str, state: str
     ) -> RetryMessage:
-        """Build a RetryMessage from a JobContext plus the Batch job id."""
-        return cls(**asdict(context), batch_job_id=batch_job_id, label=label)
+        """Build a RetryMessage from a JobContext plus the Batch job id and state."""
+        return cls(**asdict(context), batch_job_id=batch_job_id, state=state)
 
     @property
     def context(self) -> JobContext:
@@ -338,7 +396,6 @@ class ProcessingEventRecord:
     timestamp: str
     batch_job_id: str | None = None
     exit_code: int | None = None
-    label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary, dropping None-valued fields.

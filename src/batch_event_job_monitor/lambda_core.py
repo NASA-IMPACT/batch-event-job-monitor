@@ -86,29 +86,30 @@ def monitor_job(
         The classified processing state for this event.
     """
     current_time = now or _utcnow
+    outcomes = exit_code_outcomes or ExitCodeOutcomes()
+    states = outcomes.states()
 
     job = JobDetails.from_event(detail)
-    classification = job.classify(retry_policy, exit_code_outcomes)
-    new_state = classification.state
+    new_state = job.classify(retry_policy, outcomes)
 
-    old_state = log_store.find_state_pointer(context=context)
+    old_state = log_store.find_state_pointer(context=context, states=states)
     old_attempt = context.attempt
 
-    if old_state is None and new_state is ProcessingState.SUBMITTED:
+    if old_state is None and new_state == ProcessingState.SUBMITTED:
         active = log_store.find_active_pointer(
             job_type=context.job_type,
             partition_fields=context.partition_fields,
             input_entity_id=context.input_entity_id,
+            states=states,
         )
         if active is not None:
             old_state, old_attempt = active
 
     event = ProcessingEventRecord(
-        state=new_state.value,
+        state=new_state.name,
         timestamp=current_time().isoformat(),
         batch_job_id=job.job_id,
         exit_code=job.exit_code,
-        label=classification.label,
     )
 
     # Monotonicity guard (same attempt only): EventBridge does not guarantee
@@ -142,18 +143,16 @@ def monitor_job(
     terminal = new_state.is_terminal(context.attempt, retry_policy)
 
     if terminal:
-        log_store.write_output_index(
-            context=context, state=new_state, label=classification.label
-        )
+        log_store.write_output_index(context=context, state=new_state)
 
     message_body = RetryMessage.from_context(
-        context, batch_job_id=job.job_id, label=classification.label
+        context, batch_job_id=job.job_id, state=new_state.name
     ).to_json()
 
-    if new_state is ProcessingState.FAILURE_RETRYABLE and not terminal:
+    if new_state.retryable and not terminal:
         if retry_queue_url is not None:
             sqs_client.send_message(QueueUrl=retry_queue_url, MessageBody=message_body)
-    elif terminal and new_state is not ProcessingState.SUCCESS and classification.dlq:
+    elif terminal and new_state != ProcessingState.SUCCESS and new_state.dlq:
         if dlq_url is not None:
             sqs_client.send_message(QueueUrl=dlq_url, MessageBody=message_body)
 

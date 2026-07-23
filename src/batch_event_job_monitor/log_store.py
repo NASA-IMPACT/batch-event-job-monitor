@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -11,6 +12,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from batch_event_job_monitor.models import (
+    BASELINE_PROCESSING_STATES,
     JobContext,
     ProcessingEventRecord,
     ProcessingState,
@@ -104,23 +106,18 @@ class S3RecordStore:
         )
 
     @staticmethod
-    def output_index_key(
-        state: ProcessingState, context: JobContext, label: str | None = None
-    ) -> str:
+    def output_index_key(state: ProcessingState, context: JobContext) -> str:
         """Build the output index key.
 
         Parameters
         ----------
         state : ProcessingState
-            The terminal state whose output index key is being built.
+            The terminal state whose output index key is being built. Its
+            name is used directly -- a job_type's custom terminal outcomes
+            (e.g. "CLOUDY", see ExitCodeOutcome) key exactly like any
+            built-in state.
         context : JobContext
             Identifying and partitioning fields for the job processing event.
-        label : str or None, optional
-            Consumer-defined outcome label (see ExitCodeOutcome), used in
-            place of state.name when given -- e.g. "CLOUDY" instead of
-            "FAILURE_NONRETRYABLE", for reconciliation queries that need
-            the finer-grained outcome. Purely cosmetic in the key: does not
-            affect routing, which is driven by state alone.
 
         Returns
         -------
@@ -129,7 +126,7 @@ class S3RecordStore:
         """
         partition = _render_partition(context.partition_fields)
         return (
-            f"outputs/state={label or state.name}/job_type={context.job_type}/"
+            f"outputs/state={state.name}/job_type={context.job_type}/"
             f"{partition}{context.output_entity_id}"
         )
 
@@ -298,7 +295,6 @@ class S3RecordStore:
         *,
         context: JobContext,
         state: ProcessingState,
-        label: str | None = None,
     ) -> None:
         """Write an empty output index entry for a terminal state.
 
@@ -308,10 +304,8 @@ class S3RecordStore:
             Identifying and partitioning fields for the job processing event.
         state : ProcessingState
             The terminal state to index under.
-        label : str or None, optional
-            Consumer-defined outcome label -- see output_index_key.
         """
-        key = self.output_index_key(state, context, label)
+        key = self.output_index_key(state, context)
         self.client.put_object(Bucket=self.bucket, Key=key, Body=b"")
 
     # -------------------- scanning
@@ -353,11 +347,26 @@ class S3RecordStore:
         return results
 
     # -------------------- current-state lookups
-    def find_state_pointer(self, *, context: JobContext) -> ProcessingState | None:
+    def find_state_pointer(
+        self,
+        *,
+        context: JobContext,
+        states: Iterable[ProcessingState] = BASELINE_PROCESSING_STATES,
+    ) -> ProcessingState | None:
         """Look up the state pointer for an exact (entity, attempt).
 
-        Checks existence of each of the 5 possible state pointers for this
-        context via head_object. Used for same-attempt transitions.
+        Checks existence of each candidate state pointer for this context
+        via head_object. Used for same-attempt transitions.
+
+        Parameters
+        ----------
+        context : JobContext
+            Identifying and partitioning fields for the job processing event.
+        states : Iterable[ProcessingState], optional
+            The bounded set of states to check. Defaults to the five
+            built-in lifecycle states; pass a job_type's
+            ExitCodeOutcomes.states() when it declares custom terminal
+            outcomes, so pointers in those states are found too.
 
         Returns
         -------
@@ -369,7 +378,7 @@ class S3RecordStore:
             highest-ranked state as authoritative.
         """
         hits: list[ProcessingState] = []
-        for state in ProcessingState:
+        for state in states:
             key = self.state_pointer_key(state, context)
             try:
                 self.client.head_object(Bucket=self.bucket, Key=key)
@@ -397,14 +406,26 @@ class S3RecordStore:
         job_type: str,
         partition_fields: dict[str, str],
         input_entity_id: str,
+        states: Iterable[ProcessingState] = BASELINE_PROCESSING_STATES,
     ) -> tuple[ProcessingState, int] | None:
         """Look up an entity's active pointer, regardless of attempt.
 
-        Bounded scan: one list_objects_v2 call per of the 5 possible
-        states, prefixed to this input_entity_id (ignoring the attempt suffix).
+        Bounded scan: one list_objects_v2 call per candidate state,
+        prefixed to this input_entity_id (ignoring the attempt suffix).
         Used only when a SUBMITTED event's exact (entity, attempt) has no
         pointer yet, to find whichever prior attempt's pointer needs
         retiring.
+
+        Parameters
+        ----------
+        job_type : str
+            The job type.
+        partition_fields : dict[str, str]
+            Ordered partition key/value pairs.
+        input_entity_id : str
+            The processed entity identifier.
+        states : Iterable[ProcessingState], optional
+            The bounded set of states to check -- see find_state_pointer.
 
         Returns
         -------
@@ -415,7 +436,7 @@ class S3RecordStore:
             highest-ranked (then highest-attempt) hit as authoritative.
         """
         hits: list[tuple[ProcessingState, int]] = []
-        for state in ProcessingState:
+        for state in states:
             prefix = (
                 self._state_prefix(state, job_type, partition_fields)
                 + f"input_entity_id={input_entity_id}/"
@@ -445,12 +466,15 @@ class S3RecordStore:
         job_type: str,
         partition_fields: dict[str, str],
         input_entity_id: str,
+        states: Iterable[ProcessingState] = BASELINE_PROCESSING_STATES,
     ) -> int:
         """Compute the next attempt number for an entity.
 
         Convenience wrapper over find_active_pointer for ad hoc/backfill
         submitters who want the correct next bejm_attempt without
-        hand-rolling the lookup.
+        hand-rolling the lookup. Pass a job_type's ExitCodeOutcomes.states()
+        as states if it declares custom terminal outcomes, so an entity
+        whose last attempt ended in a custom state is still found.
 
         Returns
         -------
@@ -462,5 +486,6 @@ class S3RecordStore:
             job_type=job_type,
             partition_fields=partition_fields,
             input_entity_id=input_entity_id,
+            states=states,
         )
         return 1 if active is None else active[1] + 1

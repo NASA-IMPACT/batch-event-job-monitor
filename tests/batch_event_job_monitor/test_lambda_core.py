@@ -13,6 +13,7 @@ from mypy_boto3_sqs.type_defs import MessageTypeDef
 from batch_event_job_monitor.lambda_core import monitor_job
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
+    ExitCodeOutcome,
     ExitCodeOutcomesBuilder,
     JobContext,
     ProcessingState,
@@ -617,7 +618,9 @@ class TestExitCodeOutcomeRouting:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.FAILURE_NONRETRYABLE
+        assert result.name == "CLOUDY"
+        assert result.retryable is False
+        assert result.dlq is False
         assert _receive_all(sqs, dlq_url) == []
         assert _receive_all(sqs, retry_queue_url) == []
 
@@ -674,9 +677,9 @@ class TestExitCodeOutcomeRouting:
         key = S3RecordStore.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
-        assert record["events"][-1]["label"] == "CLOUDY"
+        assert record["events"][-1]["state"] == "CLOUDY"
 
-    def test_label_appears_in_output_index_key(
+    def test_custom_state_appears_in_output_index_key(
         self,
         store: S3RecordStore,
         s3: S3Client,
@@ -701,9 +704,8 @@ class TestExitCodeOutcomeRouting:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        cloudy_key = S3RecordStore.output_index_key(
-            ProcessingState.FAILURE_NONRETRYABLE, CONTEXT, label="CLOUDY"
-        )
+        cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
+        cloudy_key = S3RecordStore.output_index_key(cloudy, CONTEXT)
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=cloudy_key).get("KeyCount", 0) == 1
         )
@@ -738,5 +740,6 @@ class TestExitCodeOutcomeRouting:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.FAILURE_RETRYABLE
+        assert result.name == "TRANSIENT_TOOL_ERROR"
+        assert result.retryable is True
         assert len(_receive_all(sqs, retry_queue_url)) == 1

@@ -7,6 +7,8 @@ from mypy_boto3_s3 import S3Client
 
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
+    BASELINE_PROCESSING_STATES,
+    ExitCodeOutcome,
     JobContext,
     ProcessingEventRecord,
     ProcessingState,
@@ -212,21 +214,18 @@ class TestOutputIndex:
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         assert resp["Body"].read() == b""
 
-    def test_write_output_index_with_label_uses_label_in_key(
+    def test_write_output_index_with_custom_state_uses_its_own_name(
         self, store: S3RecordStore, s3: S3Client
     ) -> None:
         context = make_context()
-        store.write_output_index(
-            context=context, state=ProcessingState.FAILURE_NONRETRYABLE, label="CLOUDY"
-        )
-        labeled_key = S3RecordStore.output_index_key(
-            ProcessingState.FAILURE_NONRETRYABLE, context, label="CLOUDY"
-        )
-        assert "state=CLOUDY/" in labeled_key
-        resp = s3.get_object(Bucket=store.bucket, Key=labeled_key)
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        store.write_output_index(context=context, state=cloudy)
+        key = S3RecordStore.output_index_key(cloudy, context)
+        assert "state=CLOUDY/" in key
+        resp = s3.get_object(Bucket=store.bucket, Key=key)
         assert resp["Body"].read() == b""
 
-    def test_output_index_key_without_label_uses_state_name(self) -> None:
+    def test_output_index_key_uses_builtin_state_name(self) -> None:
         context = make_context()
         key = S3RecordStore.output_index_key(
             ProcessingState.FAILURE_NONRETRYABLE, context
@@ -322,6 +321,25 @@ class TestFindStatePointer:
         s3.put_object(Bucket=store.bucket, Key=key, Body=b"{}")
         assert store.find_state_pointer(context=context) is ProcessingState.SUCCESS
 
+    def test_not_found_with_default_states_when_custom_state_written(
+        self, store: S3RecordStore
+    ) -> None:
+        """A pointer written in a custom state is invisible to the default
+        (baseline-only) scan -- states must be passed explicitly."""
+        context = make_context()
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        store.write_state_pointer(context=context, new_state=cloudy, old_state=None)
+        assert store.find_state_pointer(context=context) is None
+
+    def test_found_when_custom_states_passed(self, store: S3RecordStore) -> None:
+        context = make_context()
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        store.write_state_pointer(context=context, new_state=cloudy, old_state=None)
+        result = store.find_state_pointer(
+            context=context, states=(*BASELINE_PROCESSING_STATES, cloudy)
+        )
+        assert result == cloudy
+
 
 class TestFindActivePointer:
     def test_no_active_pointer_returns_none(self, store: S3RecordStore) -> None:
@@ -377,6 +395,29 @@ class TestFindActivePointer:
             input_entity_id=INPUT_ENTITY_ID,
         )
         assert result == (ProcessingState.FAILURE_RETRYABLE, 2)
+
+    def test_custom_state_found_only_when_states_passed(
+        self, store: S3RecordStore
+    ) -> None:
+        cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
+        store.write_state_pointer(
+            context=make_context(attempt=3), new_state=cloudy, old_state=None
+        )
+        assert (
+            store.find_active_pointer(
+                job_type=JOB_TYPE,
+                partition_fields=TILE_MONTH_PARTITION,
+                input_entity_id=INPUT_ENTITY_ID,
+            )
+            is None
+        )
+        result = store.find_active_pointer(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_id=INPUT_ENTITY_ID,
+            states=(*BASELINE_PROCESSING_STATES, cloudy),
+        )
+        assert result == (cloudy, 3)
 
 
 class TestNextAttempt:

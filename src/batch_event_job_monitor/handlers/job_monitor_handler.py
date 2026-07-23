@@ -53,4 +53,4 @@ def handler(event: EventBridgeEvent, context: Context) -> dict[str, str]:
         dlq_url=os.environ.get("JOB_FAILURE_DLQ_URL"),
         sqs_client=_sqs_client,
     )
-    return {"state": new_state.value}
+    return {"state": new_state.name}

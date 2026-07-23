@@ -107,7 +107,7 @@ class TestFunction:
             "monthly-composite": JobTypeConfig(
                 retry_policy=RetryPolicy(max_attempts=5),
                 exit_code_outcomes=ExitCodeOutcomes(
-                    {4: ExitCodeOutcome(label="CLOUDY", dlq=False)}
+                    {4: ExitCodeOutcome(name="CLOUDY", dlq=False)}
                 ),
             )
         }
@@ -121,7 +121,7 @@ class TestFunction:
         assert set(configs.keys()) == {"__default__", "monthly-composite"}
         assert configs["monthly-composite"]["retry_policy"]["max_attempts"] == 5
         assert configs["monthly-composite"]["exit_code_outcomes"] == {
-            "4": {"label": "CLOUDY", "retryable": False, "dlq": False}
+            "4": {"name": "CLOUDY", "retryable": False, "dlq": False}
         }
 
     def test_custom_default_job_type_config(self) -> None:

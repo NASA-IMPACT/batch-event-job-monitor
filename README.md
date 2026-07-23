@@ -111,12 +111,12 @@ A job_type not listed in `job_type_configs` uses `default_job_type_config`. Chan
 `JobMonitorFunction` -- there is no per-job or per-invocation override, consistent with this being container-tied
 configuration, not job data.
 
-Within `ExitCodeOutcome`, `retryable` (default `False`) selects `FAILURE_RETRYABLE` vs `FAILURE_NONRETRYABLE` for
-routing/retry purposes; `dlq` (default `True`) controls whether a terminal instance of that outcome is sent to the DLQ.
-`label` is descriptive only -- it appears in the canonical event and replaces the state name in the output-index key
-(e.g. `outputs/state=CLOUDY/...` instead of `outputs/state=FAILURE_NONRETRYABLE/...`) but never affects routing. State
-_pointer_ keys are unaffected by `label` -- they stay on the fixed `ProcessingState` taxonomy, since `monitor_job`'s
-internal bounded state lookups depend on enumerating a closed set.
+Within `ExitCodeOutcome`, `name` (e.g. `"CLOUDY"`) becomes the `ProcessingState.name` used everywhere a state name
+appears -- the canonical event, the output-index key (e.g. `outputs/state=CLOUDY/...`), and the state _pointer_ key.
+There's no separate closed `ProcessingState` taxonomy that custom outcomes fall back to for pointer purposes: a
+job_type's declared `ExitCodeOutcomes` form the bounded set of states `monitor_job` scans, baseline states plus
+whatever's declared. `retryable` (default `False`) selects retryable vs non-retryable routing; `dlq` (default `True`)
+controls whether a terminal instance of that outcome is sent to the DLQ.
 
 ## Library-only path
 
