@@ -11,33 +11,31 @@ that context key.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
-from aws_cdk import App, Stack, aws_batch as batch, aws_sqs as sqs
+from aws_cdk import App, Stack, aws_sqs as sqs
 from aws_cdk.assertions import Match, Template
 
+from batch_event_job_monitor.models import JobTypeConfig
 from batch_event_job_monitor_cdk.job_resubmit_function import JobResubmitFunction
 
 _CUSTOM_ENTRY = tempfile.mkdtemp()
 Path(_CUSTOM_ENTRY, "handler.py").write_text("def handler(event, context):\n    pass\n")
 
-_BATCH_JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/queue"
-_BATCH_JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/def"
-_BATCH_JOB_DEFINITION_ARN_REVISION_7 = f"{_BATCH_JOB_DEFINITION_ARN}:7"
+_JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/queue"
+_JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/def"
+_OTHER_JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/other-queue"
+_OTHER_JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/other"
 
-
-def _make_refs(
-    stack: Stack, *, job_definition_arn: str = _BATCH_JOB_DEFINITION_ARN
-) -> tuple[batch.IJobQueue, batch.IJobDefinition]:
-    job_queue = batch.JobQueue.from_job_queue_arn(
-        stack, "JobQueue", _BATCH_JOB_QUEUE_ARN
+_ONE_JOB_TYPE_CONFIG = {
+    "monthly-composite": JobTypeConfig(
+        job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
     )
-    job_definition = batch.EcsJobDefinition.from_job_definition_arn(
-        stack, "JobDefinition", job_definition_arn
-    )
-    return job_queue, job_definition
+}
 
 
 def _make_stack(
@@ -47,17 +45,15 @@ def _make_stack(
     entry: str | None = None,
     index: str | None = None,
     app_context: dict[str, object] | None = None,
-    job_definition_arn: str = _BATCH_JOB_DEFINITION_ARN,
+    job_type_configs: dict[str, JobTypeConfig] | None = None,
 ) -> tuple[Stack, JobResubmitFunction]:
     app = App(context=app_context or {})
     stack = Stack(app, "TestStack")
     retry_queue = sqs.Queue(stack, "RetryQueue")
-    job_queue, job_definition = _make_refs(stack, job_definition_arn=job_definition_arn)
     construct = JobResubmitFunction(
         stack,
         "TestJobResubmitFunction",
-        job_queue=job_queue,
-        job_definition=job_definition,
+        job_type_configs=job_type_configs or _ONE_JOB_TYPE_CONFIG,
         retry_queue=retry_queue,
         entry=entry,
         index=index,
@@ -73,6 +69,16 @@ def _make_override_stack() -> tuple[Stack, JobResubmitFunction]:
         index="handler.py",
         app_context={"aws:cdk:bundling-stacks": []},
     )
+
+
+def _job_type_configs_env_var(stack: Stack) -> dict[str, Any]:
+    template = Template.from_stack(stack)
+    resources = template.to_json()["Resources"]
+    [fn] = [r for r in resources.values() if r["Type"] == "AWS::Lambda::Function"]
+    configs: dict[str, Any] = json.loads(
+        fn["Properties"]["Environment"]["Variables"]["PROCESSING_JOB_TYPE_CONFIGS"]
+    )
+    return configs
 
 
 class TestDefaultHandler:
@@ -92,22 +98,11 @@ class TestDefaultHandler:
             },
         )
 
-    def test_sets_job_queue_and_definition_env_vars(self) -> None:
+    def test_sets_job_type_configs_env_var(self) -> None:
         stack, _ = _make_stack()
-        template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Lambda::Function",
-            {
-                "Environment": {
-                    "Variables": Match.object_like(
-                        {
-                            "BATCH_JOB_QUEUE_ARN": _BATCH_JOB_QUEUE_ARN,
-                            "BATCH_JOB_DEFINITION_ARN": _BATCH_JOB_DEFINITION_ARN,
-                        }
-                    )
-                }
-            },
-        )
+        configs = _job_type_configs_env_var(stack)
+        assert configs["monthly-composite"]["job_queue_arn"] == _JOB_QUEUE_ARN
+        assert configs["monthly-composite"]["job_definition_arn"] == _JOB_DEFINITION_ARN
 
     def test_passes_through_extra_environment(self) -> None:
         stack, _ = _make_stack(environment={"CUSTOM_KEY": "custom-value"})
@@ -138,22 +133,10 @@ class TestCustomHandlerOverride:
         template = Template.from_stack(stack)
         template.resource_count_is("AWS::Lambda::Function", 1)
 
-    def test_sets_job_queue_and_definition_env_vars(self) -> None:
+    def test_sets_job_type_configs_env_var(self) -> None:
         stack, _ = _make_override_stack()
-        template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Lambda::Function",
-            {
-                "Environment": {
-                    "Variables": Match.object_like(
-                        {
-                            "BATCH_JOB_QUEUE_ARN": _BATCH_JOB_QUEUE_ARN,
-                            "BATCH_JOB_DEFINITION_ARN": _BATCH_JOB_DEFINITION_ARN,
-                        }
-                    )
-                }
-            },
-        )
+        configs = _job_type_configs_env_var(stack)
+        assert configs["monthly-composite"]["job_queue_arn"] == _JOB_QUEUE_ARN
 
 
 class TestIamGrants:
@@ -173,8 +156,8 @@ class TestIamGrants:
                                     ),
                                     "Resource": Match.array_with(
                                         [
-                                            _BATCH_JOB_QUEUE_ARN,
-                                            f"{_BATCH_JOB_DEFINITION_ARN}:*",
+                                            _JOB_QUEUE_ARN,
+                                            f"{_JOB_DEFINITION_ARN}:*",
                                         ]
                                     ),
                                 }
@@ -201,29 +184,17 @@ class TestIamGrants:
         assert "batch:DescribeJobs" not in actions
         assert "batch:SubmitJob" in actions
 
-
-class TestJobDefinitionRevision:
-    """A revision-pinned IJobDefinition must not pin resubmissions to that
-    revision -- Batch resolves a family ARN (no revision) to whichever
-    revision is currently ACTIVE, so resubmissions pick up new revisions
-    without redeploying this construct."""
-
-    def test_revision_stripped_from_env_var(self) -> None:
-        stack, _ = _make_stack(job_definition_arn=_BATCH_JOB_DEFINITION_ARN_REVISION_7)
-        template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Lambda::Function",
-            {
-                "Environment": {
-                    "Variables": Match.object_like(
-                        {"BATCH_JOB_DEFINITION_ARN": _BATCH_JOB_DEFINITION_ARN}
-                    )
-                }
-            },
-        )
-
-    def test_revision_replaced_with_wildcard_in_iam_resource(self) -> None:
-        stack, _ = _make_stack(job_definition_arn=_BATCH_JOB_DEFINITION_ARN_REVISION_7)
+    def test_resources_union_across_job_types(self) -> None:
+        job_type_configs = {
+            "monthly-composite": JobTypeConfig(
+                job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
+            ),
+            "granule-processing": JobTypeConfig(
+                job_queue_arn=_OTHER_JOB_QUEUE_ARN,
+                job_definition_arn=_OTHER_JOB_DEFINITION_ARN,
+            ),
+        }
+        stack, _ = _make_stack(job_type_configs=job_type_configs)
         template = Template.from_stack(stack)
         template.has_resource_properties(
             "AWS::IAM::Policy",
@@ -234,7 +205,12 @@ class TestJobDefinitionRevision:
                             Match.object_like(
                                 {
                                     "Resource": Match.array_with(
-                                        [f"{_BATCH_JOB_DEFINITION_ARN}:*"]
+                                        [
+                                            _JOB_QUEUE_ARN,
+                                            f"{_JOB_DEFINITION_ARN}:*",
+                                            _OTHER_JOB_QUEUE_ARN,
+                                            f"{_OTHER_JOB_DEFINITION_ARN}:*",
+                                        ]
                                     ),
                                 }
                             )

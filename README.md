@@ -40,7 +40,7 @@ context = JobContext.new(
 submit_job(
     batch_client=batch_client,
     build_submit_job_params=lambda ctx: {
-        "jobName": f"composite-{ctx.input_entity_id}",
+        "jobName": ctx.batch_job_name(),
         "jobQueue": "...",
         "jobDefinition": "...",
     },
@@ -48,51 +48,38 @@ submit_job(
 )
 ```
 
+`JobContext.batch_job_name()` builds a Batch-safe `jobName` (Batch caps this at 128 characters) from
+`job_type`/`input_entity_id`/`attempt`, truncating and appending a short hash so distinct contexts never collide even
+once truncated.
+
 Resubmitting an already-tracked entity outside the retry-queue flow (e.g. a manual resubmission via the Batch
 console/CLI)? Use `S3RecordStore.next_attempt(...)` to get the correct next `attempt` without hand-computing it.
 
 ## Batteries included: `JobMonitorFunction`
 
 `JobMonitorFunction` bundles its own Lambda handler -- no consumer-authored Python is required for the common case. It
-wires an EventBridge rule matching every `aws.batch` job state-change event to the bundled handler, which decodes the
-`bejm_*` identity parameters and calls `monitor_job` internally.
+wires one EventBridge rule per job_type, each scoped to that job_type's own Batch job queue/job definition, to the
+bundled handler, which decodes the `bejm_*` identity parameters and calls `monitor_job` internally.
+
+Every job_type this construct monitors needs an entry in `job_type_configs` -- a job_type not listed there is never
+matched by any rule the construct creates, so its events never reach the Lambda. `JobTypeConfig` bundles that job_type's
+queue/job-definition identity alongside its retry policy and exit-code handling -- all deploy-time, tied to a container
+image/tag, not read from a job's own Batch parameters. This also means retry behavior can differ by job_type: some job
+types are flakier than others (e.g. ones calling external services).
 
 ```python
-from batch_event_job_monitor.models import JobTypeConfig, RetryPolicy
-from batch_event_job_monitor_cdk import JobMonitorFunction
+from aws_cdk import aws_batch as batch
+from batch_event_job_monitor.models import ExitCodeOutcomesBuilder, RetryPolicy
+from batch_event_job_monitor_cdk import JobMonitorFunction, job_type_config
 
 JobMonitorFunction(
     self,
     "JobMonitor",
     processing_bucket=processing_bucket.bucket,
-    default_job_type_config=JobTypeConfig(retry_policy=RetryPolicy(max_attempts=3)),
-    retry_queue=retry_queue,
-    dlq=dlq,
-)
-```
-
-### Per-job_type classification config
-
-Retry policy and exit-code handling are deploy-time configuration -- tied to a container image/tag, not to any
-individual job -- so they're resolved by `JobMonitorFunction` itself from a `JobTypeConfig`, not read from a job's own
-Batch parameters. This also means retry behavior can differ by job_type: some job types are flakier than others (e.g.
-ones calling external services).
-
-```python
-from batch_event_job_monitor.models import (
-    ExitCodeOutcomesBuilder,
-    JobTypeConfig,
-    RetryPolicy,
-)
-from batch_event_job_monitor_cdk import JobMonitorFunction
-
-JobMonitorFunction(
-    self,
-    "JobMonitor",
-    processing_bucket=processing_bucket.bucket,
-    default_job_type_config=JobTypeConfig(retry_policy=RetryPolicy(max_attempts=3)),
     job_type_configs={
-        "monthly-composite": JobTypeConfig(
+        "monthly-composite": job_type_config(
+            job_queue=job_queue,            # aws_cdk.aws_batch.IJobQueue
+            job_definition=job_definition,  # aws_cdk.aws_batch.IJobDefinition
             retry_policy=RetryPolicy(max_attempts=5),  # flakier: calls an external API
             exit_code_outcomes=(
                 ExitCodeOutcomesBuilder()
@@ -107,16 +94,17 @@ JobMonitorFunction(
 )
 ```
 
-A job_type not listed in `job_type_configs` uses `default_job_type_config`. Changing either requires a redeploy of
-`JobMonitorFunction` -- there is no per-job or per-invocation override, consistent with this being container-tied
-configuration, not job data.
+`job_type_config()` extracts `job_queue_arn`/`job_definition_arn` from typed CDK refs (stripping any job-definition
+revision suffix -- Batch resolves a family ARN to whichever revision is currently `ACTIVE`, so a new revision is picked
+up automatically without redeploying). Changing a `JobTypeConfig` requires a redeploy of `JobMonitorFunction` -- there
+is no per-job or per-invocation override, consistent with this being container-tied configuration, not job data.
 
 Within `ExitCodeOutcome`, `name` (e.g. `"CLOUDY"`) becomes the `ProcessingState.name` used everywhere a state name
 appears -- the canonical event, the output-index key (e.g. `outputs/state=CLOUDY/...`), and the state _pointer_ key.
 There's no separate closed `ProcessingState` taxonomy that custom outcomes fall back to for pointer purposes: a
 job_type's declared `ExitCodeOutcomes` form the bounded set of states `monitor_job` scans, baseline states plus
-whatever's declared. `retryable` (default `False`) selects retryable vs non-retryable routing; `dlq` (default `True`)
-controls whether a terminal instance of that outcome is sent to the DLQ.
+whatever's declared. `retryable` (default `False`) selects retryable vs non-retryable routing; `dlq` is required (no
+default) -- every outcome must state its routing intent explicitly.
 
 ## Library-only path
 
@@ -127,7 +115,8 @@ Lambda handler and wire it up yourself.
 ## Resubmitting jobs: `JobResubmitFunction`
 
 `JobResubmitFunction` bundles a generic default handler for the common case (same job queue/job definition every
-attempt) -- no consumer-authored Lambda code needed:
+attempt, per job_type) -- no consumer-authored Lambda code needed. It takes the same `job_type_configs` mapping
+`JobMonitorFunction` does, and routes each resubmission to its job_type's own queue/job definition:
 
 ```python
 from batch_event_job_monitor_cdk import JobResubmitFunction
@@ -135,8 +124,7 @@ from batch_event_job_monitor_cdk import JobResubmitFunction
 JobResubmitFunction(
     self,
     "JobResubmit",
-    job_queue=job_queue,            # aws_cdk.aws_batch.IJobQueue
-    job_definition=job_definition,  # aws_cdk.aws_batch.IJobDefinition
+    job_type_configs=job_type_configs,  # the same mapping passed to JobMonitorFunction
     retry_queue=retry_queue,
 )
 ```

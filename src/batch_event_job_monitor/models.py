@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
@@ -142,6 +143,8 @@ class RetryPolicy:
 
 
 _PARAM_PREFIX = "bejm_"
+_MAX_BATCH_JOB_NAME_LENGTH = 128
+_JOB_NAME_HASH_LENGTH = 8
 
 
 @dataclass(frozen=True)
@@ -175,6 +178,21 @@ class JobContext:
     def next_attempt(self) -> JobContext:
         """This context's entity, advanced to its next attempt."""
         return replace(self, attempt=self.attempt + 1)
+
+    def batch_job_name(self) -> str:
+        """A Batch-safe jobName for this context, bounded to 128 chars.
+
+        AWS Batch caps jobName at 128 characters. Appends a short hash of
+        (job_type, input_entity_id, attempt) and truncates the
+        human-readable prefix to fit, so distinct contexts never collide
+        even once truncated.
+        """
+        digest = hashlib.sha256(
+            f"{self.job_type}:{self.input_entity_id}:{self.attempt}".encode()
+        ).hexdigest()[:_JOB_NAME_HASH_LENGTH]
+        suffix = f"-{digest}"
+        prefix = f"{self.job_type}-{self.input_entity_id}-{self.attempt}"
+        return prefix[: _MAX_BATCH_JOB_NAME_LENGTH - len(suffix)] + suffix
 
     def to_batch_parameters(self) -> dict[str, str]:
         """Encode this context as AWS Batch SubmitJobRequest.parameters.
@@ -313,34 +331,53 @@ class ExitCodeOutcomesBuilder:
 
 @dataclass(frozen=True)
 class JobTypeConfig:
-    """Deploy-time classification config for one job_type.
+    """Deploy-time config for one job_type.
 
-    Bundles retry_policy and exit_code_outcomes since both are tied to a
-    container image/tag -- a redeploy is required to change either.
-
-    Both are genuinely job_type-specific: some job types are flakier than
-    others (e.g. those calling external services), and exit-code meaning is
-    always container-specific.
+    Attributes
+    ----------
+    job_queue_arn : str
+        ARN of the Batch job queue this job_type's jobs are submitted to.
+        Required -- JobMonitorFunction scopes its EventBridge rule to this
+        queue, and JobResubmitFunction's default handler routes
+        resubmissions to it by job_type.
+    job_definition_arn : str
+        ARN of the Batch job definition this job_type's jobs use, with any
+        revision suffix stripped (the family ARN). Required, for the same
+        reasons as job_queue_arn -- rule scoping and resubmit routing.
+    retry_policy : RetryPolicy, optional
+        Retry behavior for this job_type. Tied to a container image/tag --
+        a redeploy is required to change it. Some job types are flakier
+        than others (e.g. those calling external services), so this is
+        genuinely job_type-specific. Defaults to RetryPolicy().
+    exit_code_outcomes : ExitCodeOutcomes, optional
+        This job_type's exit-code taxonomy. Always container-specific, so
+        deploy-time like retry_policy. Defaults to no custom outcomes.
 
     JobMonitorFunction resolves one JobTypeConfig per job_type from a
     single deploy-time env var; there is no per-job or per-invocation
     override.
     """
 
+    job_queue_arn: str
+    job_definition_arn: str
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     exit_code_outcomes: ExitCodeOutcomes = field(default_factory=ExitCodeOutcomes)
 
     def to_dict(self) -> dict[str, Any]:
         """Encode for embedding in JobMonitorFunction's deploy-time JSON."""
         return {
+            "job_queue_arn": self.job_queue_arn,
+            "job_definition_arn": self.job_definition_arn,
             "retry_policy": self.retry_policy.to_dict(),
             "exit_code_outcomes": self.exit_code_outcomes.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> JobTypeConfig:
-        """Decode from JobMonitorFunction's deploy-time JSON. Missing keys default."""
+        """Decode from JobMonitorFunction's deploy-time JSON."""
         return cls(
+            job_queue_arn=data["job_queue_arn"],
+            job_definition_arn=data["job_definition_arn"],
             retry_policy=RetryPolicy.from_dict(data.get("retry_policy", {})),
             exit_code_outcomes=ExitCodeOutcomes.from_dict(
                 data.get("exit_code_outcomes", {})

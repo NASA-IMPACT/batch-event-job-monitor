@@ -18,7 +18,6 @@ from typing import Any
 
 from aws_cdk import (
     Duration,
-    aws_batch as batch,
     aws_events as events,
     aws_events_targets as targets,
     aws_lambda as _lambda,
@@ -29,10 +28,6 @@ from constructs import Construct
 
 import batch_event_job_monitor
 from batch_event_job_monitor.models import JobTypeConfig
-
-# Reserved job_type key for the fallback JobTypeConfig applied to any
-# job_type not explicitly listed in job_type_configs.
-_DEFAULT_JOB_TYPE_CONFIG_KEY = "__default__"
 
 _HANDLER_ENTRY = str(Path(batch_event_job_monitor.__file__).parent.parent)
 _HANDLER_EXCLUDE = [
@@ -67,12 +62,10 @@ class JobMonitorFunction(Construct):
     JobContext from each EventBridge job state-change event.
 
     No job_type prop: one instance can monitor multiple job types sharing a
-    bucket/queue, since job_type is self-describing per event.
-
-    Classification config (retry policy, exit-code outcomes) is
-    deploy-time and job_type-specific -- see JobTypeConfig -- since it's
-    tied to a container image/tag, not to any individual job. There is no
-    per-job or per-invocation override.
+    bucket, since job_type is self-describing per event. Each job_type's
+    own JobTypeConfig carries its queue/job-definition identity, used both
+    to scope that job_type's EventBridge rule and (see JobResubmitFunction)
+    to route resubmissions.
 
     Parameters
     ----------
@@ -83,22 +76,18 @@ class JobMonitorFunction(Construct):
     processing_bucket : s3.IBucket
         Bucket the job monitor reads/writes canonical records, state
         pointers, and output index entries to.
-    job_type_configs : dict[str, JobTypeConfig] or None, optional
-        Per-job_type classification config, keyed by job_type. A job_type
-        not listed here uses default_job_type_config.
-    default_job_type_config : JobTypeConfig or None, optional
-        Fallback classification config for any job_type not listed in
-        job_type_configs. Defaults to JobTypeConfig() (max_attempts=3,
-        no custom exit-code outcomes).
+    job_type_configs : dict[str, JobTypeConfig]
+        Config for every job_type this construct monitors, keyed by
+        job_type. A job_type not listed here is never matched by any
+        EventBridge rule this construct creates, so its events never reach
+        the Lambda. See batch_event_job_monitor_cdk.job_type_config for a
+        helper that builds a JobTypeConfig from typed CDK Batch refs.
     retry_queue : sqs.IQueue or None, optional
         SQS queue to notify for retryable failures with attempts
         remaining. If not given, no retry routing occurs.
     dlq : sqs.IQueue or None, optional
         SQS queue to notify for terminal non-success outcomes. If not
         given, no DLQ routing occurs.
-    job_queues : list[batch.IJobQueue] or None, optional
-        AWS Batch job queues to scope the EventBridge rule to. If not
-        given, the rule matches job state changes from any queue.
     function_name : str or None, optional
         Explicit Lambda function name.
     memory_size : int, optional
@@ -112,9 +101,9 @@ class JobMonitorFunction(Construct):
     ----------
     function : _lambda.Function
         The bundled job-monitor Lambda.
-    rule : events.Rule
-        The EventBridge rule invoking the Lambda for Batch job state
-        changes.
+    rules : dict[str, events.Rule]
+        The EventBridge rule invoking the Lambda for each job_type's own
+        Batch job queue/job definition, keyed by job_type.
     """
 
     def __init__(
@@ -123,11 +112,9 @@ class JobMonitorFunction(Construct):
         construct_id: str,
         *,
         processing_bucket: s3.IBucket,
-        job_type_configs: dict[str, JobTypeConfig] | None = None,
-        default_job_type_config: JobTypeConfig | None = None,
+        job_type_configs: dict[str, JobTypeConfig],
         retry_queue: sqs.IQueue | None = None,
         dlq: sqs.IQueue | None = None,
-        job_queues: list[batch.IJobQueue] | None = None,
         function_name: str | None = None,
         memory_size: int = 256,
         timeout: Duration = Duration.minutes(1),
@@ -135,16 +122,12 @@ class JobMonitorFunction(Construct):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        all_job_type_configs = {
-            _DEFAULT_JOB_TYPE_CONFIG_KEY: default_job_type_config or JobTypeConfig(),
-            **(job_type_configs or {}),
-        }
         environment = {
             "PROCESSING_BUCKET_NAME": processing_bucket.bucket_name,
             "PROCESSING_JOB_TYPE_CONFIGS": json.dumps(
                 {
                     job_type: config.to_dict()
-                    for job_type, config in all_job_type_configs.items()
+                    for job_type, config in job_type_configs.items()
                 }
             ),
         }
@@ -171,17 +154,24 @@ class JobMonitorFunction(Construct):
         if dlq is not None:
             dlq.grant_send_messages(self.function)
 
-        detail: dict[str, Any] = {"status": _ALL_BATCH_STATUSES}
-        if job_queues is not None:
-            detail["jobQueue"] = [q.job_queue_arn for q in job_queues]
-
-        self.rule = events.Rule(
-            self,
-            "JobStateChangeRule",
-            event_pattern=events.EventPattern(
-                source=["aws.batch"],
-                detail_type=["Batch Job State Change"],
-                detail=detail,
-            ),
-            targets=[targets.LambdaFunction(self.function, retry_attempts=3)],
-        )
+        # One rule per job_type, scoped to that job_type's own queue/job
+        # definition -- jobDefinition matches by prefix since the event's
+        # own jobDefinition field is revision-suffixed even though
+        # JobTypeConfig.job_definition_arn is the family ARN.
+        self.rules = {
+            job_type: events.Rule(
+                self,
+                f"JobStateChangeRule{job_type}",
+                event_pattern=events.EventPattern(
+                    source=["aws.batch"],
+                    detail_type=["Batch Job State Change"],
+                    detail={
+                        "status": _ALL_BATCH_STATUSES,
+                        "jobQueue": [config.job_queue_arn],
+                        "jobDefinition": [{"prefix": f"{config.job_definition_arn}:"}],
+                    },
+                ),
+                targets=[targets.LambdaFunction(self.function, retry_attempts=3)],
+            )
+            for job_type, config in job_type_configs.items()
+        }

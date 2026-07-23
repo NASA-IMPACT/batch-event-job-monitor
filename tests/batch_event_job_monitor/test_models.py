@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -332,6 +333,64 @@ class TestJobContext:
         assert json.loads(params["bejm_partition_fields"]) == {"a": "1", "b": "2"}
 
 
+class TestBatchJobName:
+    """Tests for JobContext.batch_job_name."""
+
+    def test_short_name_within_limit_includes_hash_suffix(self) -> None:
+        context = JobContext(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_id="12TVK_2024-06_source",
+            output_entity_id="12TVK_2024-06_output",
+            attempt=1,
+        )
+        name = context.batch_job_name()
+        assert len(name) <= 128
+        assert name.startswith("monthly-composite-12TVK_2024-06_source-1-")
+
+    def test_long_name_truncated_to_128_chars(self) -> None:
+        context = JobContext(
+            job_type="a" * 200,
+            partition_fields={},
+            input_entity_id="b" * 200,
+            output_entity_id="o",
+            attempt=1,
+        )
+        name = context.batch_job_name()
+        assert len(name) == 128
+
+    def test_deterministic_for_same_context(self) -> None:
+        context = JobContext(
+            job_type="job",
+            partition_fields={},
+            input_entity_id="entity",
+            output_entity_id="o",
+            attempt=1,
+        )
+        assert context.batch_job_name() == context.batch_job_name()
+
+    def test_distinct_attempts_produce_distinct_names(self) -> None:
+        context = JobContext(
+            job_type="job",
+            partition_fields={},
+            input_entity_id="entity",
+            output_entity_id="o",
+            attempt=1,
+        )
+        assert context.batch_job_name() != context.next_attempt().batch_job_name()
+
+    def test_names_still_distinct_after_truncation(self) -> None:
+        base = JobContext(
+            job_type="a" * 200,
+            partition_fields={},
+            input_entity_id="b" * 200,
+            output_entity_id="o",
+            attempt=1,
+        )
+        other = replace(base, attempt=2)
+        assert base.batch_job_name() != other.batch_job_name()
+
+
 class TestRetryMessage:
     """Tests for RetryMessage."""
 
@@ -502,14 +561,22 @@ class TestExitCodeOutcomesBuilder:
         assert outcomes.get(3) == ExitCodeOutcome(name="SECOND", dlq=False)
 
 
+_JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/queue"
+_JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/def"
+
+
 class TestJobTypeConfig:
     def test_defaults(self) -> None:
-        config = JobTypeConfig()
+        config = JobTypeConfig(
+            job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
+        )
         assert config.retry_policy == RetryPolicy()
         assert config.exit_code_outcomes == ExitCodeOutcomes()
 
     def test_to_dict_from_dict_round_trips(self) -> None:
         config = JobTypeConfig(
+            job_queue_arn=_JOB_QUEUE_ARN,
+            job_definition_arn=_JOB_DEFINITION_ARN,
             retry_policy=RetryPolicy(max_attempts=5),
             exit_code_outcomes=ExitCodeOutcomes(
                 {4: ExitCodeOutcome(name="CLOUDY", dlq=False)}
@@ -517,13 +584,28 @@ class TestJobTypeConfig:
         )
         assert JobTypeConfig.from_dict(config.to_dict()) == config
 
-    def test_from_dict_missing_keys_uses_defaults(self) -> None:
-        assert JobTypeConfig.from_dict({}) == JobTypeConfig()
+    def test_from_dict_missing_optional_keys_uses_defaults(self) -> None:
+        config = JobTypeConfig.from_dict(
+            {"job_queue_arn": _JOB_QUEUE_ARN, "job_definition_arn": _JOB_DEFINITION_ARN}
+        )
+        assert config == JobTypeConfig(
+            job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
+        )
+
+    def test_from_dict_missing_job_queue_arn_raises(self) -> None:
+        with pytest.raises(KeyError):
+            JobTypeConfig.from_dict({"job_definition_arn": _JOB_DEFINITION_ARN})
+
+    def test_from_dict_missing_job_definition_arn_raises(self) -> None:
+        with pytest.raises(KeyError):
+            JobTypeConfig.from_dict({"job_queue_arn": _JOB_QUEUE_ARN})
 
     def test_to_dict_is_json_serializable(self) -> None:
         config = JobTypeConfig(
+            job_queue_arn=_JOB_QUEUE_ARN,
+            job_definition_arn=_JOB_DEFINITION_ARN,
             exit_code_outcomes=ExitCodeOutcomes(
                 {4: ExitCodeOutcome(name="CLOUDY", dlq=False)}
-            )
+            ),
         )
         assert json.loads(json.dumps(config.to_dict())) == config.to_dict()

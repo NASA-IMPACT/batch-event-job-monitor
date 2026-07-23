@@ -23,15 +23,12 @@ if TYPE_CHECKING:
     from aws_lambda_typing.context import Context
     from aws_lambda_typing.events import EventBridgeEvent
 
-_DEFAULT_JOB_TYPE_CONFIG_KEY = "__default__"
-
 _sqs_client = boto3.client("sqs")
 
 
 def _job_type_config(job_type: str) -> JobTypeConfig:
     all_configs = json.loads(os.environ["PROCESSING_JOB_TYPE_CONFIGS"])
-    raw = all_configs.get(job_type, all_configs[_DEFAULT_JOB_TYPE_CONFIG_KEY])
-    return JobTypeConfig.from_dict(raw)
+    return JobTypeConfig.from_dict(all_configs[job_type])
 
 
 def handler(event: EventBridgeEvent, context: Context) -> dict[str, str]:

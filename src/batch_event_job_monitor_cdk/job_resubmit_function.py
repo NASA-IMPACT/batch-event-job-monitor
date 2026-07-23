@@ -2,9 +2,9 @@
 
 Bundles a generic default handler (see
 batch_event_job_monitor.handlers.job_resubmit_handler) covering the common
-case -- reuse the same Batch job queue/job definition every attempt, no
-custom containerOverrides -- with zero consumer-authored Python, the same
-way JobMonitorFunction does.
+case -- reuse each job_type's own Batch job queue/job definition every
+attempt, no custom containerOverrides -- with zero consumer-authored
+Python, the same way JobMonitorFunction does.
 
 For anything the default can't express (per-attempt container overrides, a
 computed command, batch:DescribeJobs-driven introspection of the original
@@ -14,12 +14,12 @@ docs/resubmitting-jobs.md.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from aws_cdk import (
     Duration,
-    aws_batch as batch,
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_lambda_event_sources as event_sources,
@@ -29,6 +29,7 @@ from aws_cdk import (
 from constructs import Construct
 
 import batch_event_job_monitor
+from batch_event_job_monitor.models import JobTypeConfig
 
 _HANDLER_ENTRY = str(Path(batch_event_job_monitor.__file__).parent.parent)
 _HANDLER_EXCLUDE = [
@@ -39,18 +40,6 @@ _HANDLER_EXCLUDE = [
     "**/*.pyc",
 ]
 _DEFAULT_HANDLER_PATH = "batch_event_job_monitor.handlers.job_resubmit_handler.handler"
-
-
-def _job_definition_family_arn(job_definition: batch.IJobDefinition) -> str:
-    """job_definition's ARN with any revision suffix stripped.
-
-    Batch resolves a family ARN (no revision) to whichever revision is
-    currently ACTIVE, so resubmissions automatically pick up a new revision
-    without redeploying this construct.
-    """
-    arn = job_definition.job_definition_arn
-    prefix, _, suffix = arn.rpartition(":")
-    return prefix if suffix.isdigit() else arn
 
 
 class JobResubmitFunction(Construct):
@@ -67,17 +56,14 @@ class JobResubmitFunction(Construct):
         Parent construct.
     construct_id : str
         Construct id, unique within scope.
-    job_queue : batch.IJobQueue
-        The AWS Batch job queue jobs are resubmitted to. Used for the
-        default handler's BATCH_JOB_QUEUE_ARN env var and to scope the
-        batch:SubmitJob IAM grant.
-    job_definition : batch.IJobDefinition
-        The AWS Batch job definition jobs are resubmitted with. Its
-        revision suffix, if any, is stripped before use -- resubmissions
-        target the family ARN, so a new revision is picked up automatically
-        without redeploying this construct. Used for the default handler's
-        BATCH_JOB_DEFINITION_ARN env var and to scope the batch:SubmitJob
-        IAM grant.
+    job_type_configs : dict[str, JobTypeConfig]
+        Config for every job_type this Lambda may resubmit, keyed by
+        job_type -- the same mapping passed to JobMonitorFunction. The
+        default handler routes each resubmission to its job_type's own
+        job_queue_arn/job_definition_arn; the batch:SubmitJob IAM grant is
+        scoped to the union of every listed job_type's queue/job
+        definition. See batch_event_job_monitor_cdk.job_type_config for a
+        helper that builds a JobTypeConfig from typed CDK Batch refs.
     retry_queue : sqs.IQueue
         The retry queue monitor_job publishes to; this Lambda's event
         source.
@@ -96,7 +82,7 @@ class JobResubmitFunction(Construct):
         True.
     environment : dict[str, str] or None, optional
         Additional environment variables for a custom handler (e.g. extra
-        config it needs beyond the job queue/definition ARNs, which are
+        config it needs beyond PROCESSING_JOB_TYPE_CONFIGS, which is
         always set).
     function_name : str or None, optional
         Explicit Lambda function name.
@@ -127,8 +113,7 @@ class JobResubmitFunction(Construct):
         scope: Construct,
         construct_id: str,
         *,
-        job_queue: batch.IJobQueue,
-        job_definition: batch.IJobDefinition,
+        job_type_configs: dict[str, JobTypeConfig],
         retry_queue: sqs.IQueue,
         entry: str | None = None,
         index: str | None = None,
@@ -151,11 +136,13 @@ class JobResubmitFunction(Construct):
                 "the bundled default handler)"
             )
 
-        job_definition_family_arn = _job_definition_family_arn(job_definition)
-
         full_environment = {
-            "BATCH_JOB_QUEUE_ARN": job_queue.job_queue_arn,
-            "BATCH_JOB_DEFINITION_ARN": job_definition_family_arn,
+            "PROCESSING_JOB_TYPE_CONFIGS": json.dumps(
+                {
+                    job_type: config.to_dict()
+                    for job_type, config in job_type_configs.items()
+                }
+            ),
             **(environment or {}),
         }
 
@@ -190,14 +177,13 @@ class JobResubmitFunction(Construct):
         actions = ["batch:SubmitJob"]
         if include_describe_jobs:
             actions.append("batch:DescribeJobs")
+        resources = dict.fromkeys(
+            arn
+            for config in job_type_configs.values()
+            for arn in (config.job_queue_arn, f"{config.job_definition_arn}:*")
+        )
         self.function.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=actions,
-                resources=[
-                    job_queue.job_queue_arn,
-                    f"{job_definition_family_arn}:*",
-                ],
-            )
+            iam.PolicyStatement(actions=actions, resources=list(resources))
         )
 
         self.event_source_mapping = event_sources.SqsEventSource(
