@@ -8,6 +8,7 @@ from batch_event_job_monitor.models import (
     ExitCodeOutcomes,
     JobContext,
     ProcessingState,
+    ProcessingStates,
     RetryPolicy,
 )
 
@@ -114,13 +115,13 @@ class JobDetails:
             outcome matches this job's exit code.
         """
         if self.status == "SUBMITTED":
-            return ProcessingState.SUBMITTED
+            return ProcessingStates.SUBMITTED
 
         if self.status in _AWAITING_STATUSES:
-            return ProcessingState.AWAITING
+            return ProcessingStates.AWAITING
 
         if self.status == "SUCCEEDED":
-            return ProcessingState.SUCCESS
+            return ProcessingStates.SUCCESS
 
         if self.status == "FAILED":
             outcome = (exit_code_outcomes or ExitCodeOutcomes()).get(self.exit_code)
@@ -131,8 +132,8 @@ class JobDetails:
             if status_reason.startswith(
                 retry_policy.spot_interruption_status_reason_prefixes
             ):
-                return ProcessingState.FAILURE_RETRYABLE
-            return ProcessingState.FAILURE_NONRETRYABLE
+                return ProcessingStates.FAILURE_RETRYABLE
+            return ProcessingStates.FAILURE_NONRETRYABLE
 
         raise ValueError(f"Unrecognized job status: {self.status!r}")
 

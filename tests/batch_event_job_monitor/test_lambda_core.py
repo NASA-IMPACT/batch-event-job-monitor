@@ -17,6 +17,7 @@ from batch_event_job_monitor.models import (
     ExitCodeOutcomesBuilder,
     JobContext,
     ProcessingState,
+    ProcessingStates,
     RetryPolicy,
 )
 
@@ -59,7 +60,7 @@ def _fixed_now() -> datetime:
 
 def _seed_awaiting(store: S3RecordStore, context: JobContext = CONTEXT) -> None:
     store.write_state_pointer(
-        context=context, new_state=ProcessingState.AWAITING, old_state=None
+        context=context, new_state=ProcessingStates.AWAITING, old_state=None
     )
 
 
@@ -95,7 +96,7 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.SUCCESS
+        assert result is ProcessingStates.SUCCESS
 
     def test_writes_output_index(
         self,
@@ -117,7 +118,7 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert _output_index_exists(s3, bucket, ProcessingState.SUCCESS)
+        assert _output_index_exists(s3, bucket, ProcessingStates.SUCCESS)
 
     def test_no_sqs_messages_sent(
         self,
@@ -189,14 +190,14 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        success_key = S3RecordStore.state_pointer_key(ProcessingState.SUCCESS, CONTEXT)
+        success_key = S3RecordStore.state_pointer_key(ProcessingStates.SUCCESS, CONTEXT)
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=success_key).get("KeyCount", 0)
             == 1
         )
 
         awaiting_key = S3RecordStore.state_pointer_key(
-            ProcessingState.AWAITING, CONTEXT
+            ProcessingStates.AWAITING, CONTEXT
         )
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=awaiting_key).get("KeyCount", 0)
@@ -225,7 +226,7 @@ class TestFailureRetryableWithAttemptsRemaining:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.FAILURE_RETRYABLE
+        assert result is ProcessingStates.FAILURE_RETRYABLE
 
         retry_messages = _receive_all(sqs, retry_queue_url)
         assert len(retry_messages) == 1
@@ -261,7 +262,7 @@ class TestFailureRetryableWithAttemptsRemaining:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert not _output_index_exists(s3, bucket, ProcessingState.FAILURE_RETRYABLE)
+        assert not _output_index_exists(s3, bucket, ProcessingStates.FAILURE_RETRYABLE)
 
     def test_no_retry_queue_url_sends_nothing(
         self,
@@ -312,8 +313,8 @@ class TestFailureRetryableAttemptsExhausted:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.FAILURE_RETRYABLE
-        assert _output_index_exists(s3, bucket, ProcessingState.FAILURE_RETRYABLE)
+        assert result is ProcessingStates.FAILURE_RETRYABLE
+        assert _output_index_exists(s3, bucket, ProcessingStates.FAILURE_RETRYABLE)
 
         assert _receive_all(sqs, retry_queue_url) == []
         dlq_messages = _receive_all(sqs, dlq_url)
@@ -348,8 +349,8 @@ class TestFailureNonretryable:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.FAILURE_NONRETRYABLE
-        assert _output_index_exists(s3, bucket, ProcessingState.FAILURE_NONRETRYABLE)
+        assert result is ProcessingStates.FAILURE_NONRETRYABLE
+        assert _output_index_exists(s3, bucket, ProcessingStates.FAILURE_NONRETRYABLE)
 
         assert _receive_all(sqs, retry_queue_url) == []
         dlq_messages = _receive_all(sqs, dlq_url)
@@ -438,24 +439,24 @@ class TestFullLifecycle:
         )
 
         submitted = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
-        assert submitted is ProcessingState.SUBMITTED
+        assert submitted is ProcessingStates.SUBMITTED
         assert (
             s3.list_objects_v2(
                 Bucket=bucket,
                 Prefix=S3RecordStore.state_pointer_key(
-                    ProcessingState.SUBMITTED, CONTEXT
+                    ProcessingStates.SUBMITTED, CONTEXT
                 ),
             ).get("KeyCount", 0)
             == 1
         )
 
         runnable = monitor_job(detail=make_detail(status="RUNNABLE"), **kwargs)
-        assert runnable is ProcessingState.AWAITING
+        assert runnable is ProcessingStates.AWAITING
         assert (
             s3.list_objects_v2(
                 Bucket=bucket,
                 Prefix=S3RecordStore.state_pointer_key(
-                    ProcessingState.SUBMITTED, CONTEXT
+                    ProcessingStates.SUBMITTED, CONTEXT
                 ),
             ).get("KeyCount", 0)
             == 0
@@ -464,15 +465,15 @@ class TestFullLifecycle:
             s3.list_objects_v2(
                 Bucket=bucket,
                 Prefix=S3RecordStore.state_pointer_key(
-                    ProcessingState.AWAITING, CONTEXT
+                    ProcessingStates.AWAITING, CONTEXT
                 ),
             ).get("KeyCount", 0)
             == 1
         )
 
         success = monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
-        assert success is ProcessingState.SUCCESS
-        assert _output_index_exists(s3, bucket, ProcessingState.SUCCESS)
+        assert success is ProcessingStates.SUCCESS
+        assert _output_index_exists(s3, bucket, ProcessingStates.SUCCESS)
 
         key = S3RecordStore.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
@@ -503,10 +504,10 @@ class TestFullLifecycle:
         )
         for status in ["PENDING", "RUNNABLE", "STARTING", "RUNNING"]:
             result = monitor_job(detail=make_detail(status=status), **kwargs)
-            assert result is ProcessingState.AWAITING
+            assert result is ProcessingStates.AWAITING
 
         record = store.find_state_pointer(context=CONTEXT)
-        assert record is ProcessingState.AWAITING
+        assert record is ProcessingStates.AWAITING
 
     def test_resubmitted_attempt_retires_prior_attempt_pointer(
         self,
@@ -536,7 +537,7 @@ class TestFullLifecycle:
             now=_fixed_now,
         )
         old_key = S3RecordStore.state_pointer_key(
-            ProcessingState.FAILURE_RETRYABLE, old_context
+            ProcessingStates.FAILURE_RETRYABLE, old_context
         )
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 1
 
@@ -551,10 +552,10 @@ class TestFullLifecycle:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert result is ProcessingState.SUBMITTED
+        assert result is ProcessingStates.SUBMITTED
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 0
         new_key = S3RecordStore.state_pointer_key(
-            ProcessingState.SUBMITTED, new_context
+            ProcessingStates.SUBMITTED, new_context
         )
         assert s3.list_objects_v2(Bucket=bucket, Prefix=new_key).get("KeyCount", 0) == 1
 
@@ -584,9 +585,9 @@ class TestMonotonicityGuard:
         )
         monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
         result = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
-        assert result is ProcessingState.SUBMITTED
+        assert result is ProcessingStates.SUBMITTED
 
-        assert store.find_state_pointer(context=CONTEXT) is ProcessingState.SUCCESS
+        assert store.find_state_pointer(context=CONTEXT) is ProcessingStates.SUCCESS
 
         key = S3RecordStore.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
@@ -710,7 +711,7 @@ class TestExitCodeOutcomeRouting:
             s3.list_objects_v2(Bucket=bucket, Prefix=cloudy_key).get("KeyCount", 0) == 1
         )
         assert not _output_index_exists(
-            s3, bucket, ProcessingState.FAILURE_NONRETRYABLE
+            s3, bucket, ProcessingStates.FAILURE_NONRETRYABLE
         )
 
     def test_retryable_outcome_routes_to_retry_queue(

@@ -9,7 +9,7 @@ from batch_event_job_monitor.models import (
     JobContext,
     JobTypeConfig,
     ProcessingEventRecord,
-    ProcessingState,
+    ProcessingStates,
     RetryMessage,
     RetryPolicy,
 )
@@ -20,55 +20,57 @@ class TestProcessingState:
 
     def test_processing_state_members(self) -> None:
         """Test that all built-in states exist."""
-        assert hasattr(ProcessingState, "SUBMITTED")
-        assert hasattr(ProcessingState, "AWAITING")
-        assert hasattr(ProcessingState, "SUCCESS")
-        assert hasattr(ProcessingState, "FAILURE_RETRYABLE")
-        assert hasattr(ProcessingState, "FAILURE_NONRETRYABLE")
+        assert hasattr(ProcessingStates, "SUBMITTED")
+        assert hasattr(ProcessingStates, "AWAITING")
+        assert hasattr(ProcessingStates, "SUCCESS")
+        assert hasattr(ProcessingStates, "FAILURE_RETRYABLE")
+        assert hasattr(ProcessingStates, "FAILURE_NONRETRYABLE")
 
     def test_processing_state_names(self) -> None:
         """Test that built-in ProcessingState names are correct strings."""
-        assert ProcessingState.SUBMITTED.name == "SUBMITTED"
-        assert ProcessingState.AWAITING.name == "AWAITING"
-        assert ProcessingState.SUCCESS.name == "SUCCESS"
-        assert ProcessingState.FAILURE_RETRYABLE.name == "FAILURE_RETRYABLE"
-        assert ProcessingState.FAILURE_NONRETRYABLE.name == "FAILURE_NONRETRYABLE"
+        assert ProcessingStates.SUBMITTED.name == "SUBMITTED"
+        assert ProcessingStates.AWAITING.name == "AWAITING"
+        assert ProcessingStates.SUCCESS.name == "SUCCESS"
+        assert ProcessingStates.FAILURE_RETRYABLE.name == "FAILURE_RETRYABLE"
+        assert ProcessingStates.FAILURE_NONRETRYABLE.name == "FAILURE_NONRETRYABLE"
 
     def test_only_failure_retryable_is_retryable(self) -> None:
-        assert ProcessingState.FAILURE_RETRYABLE.retryable is True
-        assert ProcessingState.SUBMITTED.retryable is False
-        assert ProcessingState.AWAITING.retryable is False
-        assert ProcessingState.SUCCESS.retryable is False
-        assert ProcessingState.FAILURE_NONRETRYABLE.retryable is False
+        assert ProcessingStates.FAILURE_RETRYABLE.retryable is True
+        assert ProcessingStates.SUBMITTED.retryable is False
+        assert ProcessingStates.AWAITING.retryable is False
+        assert ProcessingStates.SUCCESS.retryable is False
+        assert ProcessingStates.FAILURE_NONRETRYABLE.retryable is False
 
     def test_custom_state_from_outcome_is_not_baseline(self) -> None:
         """A custom outcome-derived state has its own name, not a baseline one."""
         cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
         assert cloudy.name == "CLOUDY"
-        assert cloudy != ProcessingState.FAILURE_NONRETRYABLE
+        assert cloudy != ProcessingStates.FAILURE_NONRETRYABLE
 
 
 class TestRank:
     """Tests for ProcessingState.rank."""
 
     def test_submitted_ranks_below_awaiting(self) -> None:
-        assert ProcessingState.SUBMITTED.rank < ProcessingState.AWAITING.rank
+        assert ProcessingStates.SUBMITTED.rank < ProcessingStates.AWAITING.rank
 
     def test_awaiting_ranks_below_terminal_states(self) -> None:
-        assert ProcessingState.AWAITING.rank < ProcessingState.SUCCESS.rank
-        assert ProcessingState.AWAITING.rank < ProcessingState.FAILURE_RETRYABLE.rank
-        assert ProcessingState.AWAITING.rank < ProcessingState.FAILURE_NONRETRYABLE.rank
+        assert ProcessingStates.AWAITING.rank < ProcessingStates.SUCCESS.rank
+        assert ProcessingStates.AWAITING.rank < ProcessingStates.FAILURE_RETRYABLE.rank
+        assert (
+            ProcessingStates.AWAITING.rank < ProcessingStates.FAILURE_NONRETRYABLE.rank
+        )
 
     def test_terminal_states_tie(self) -> None:
         assert (
-            ProcessingState.SUCCESS.rank
-            == ProcessingState.FAILURE_RETRYABLE.rank
-            == ProcessingState.FAILURE_NONRETRYABLE.rank
+            ProcessingStates.SUCCESS.rank
+            == ProcessingStates.FAILURE_RETRYABLE.rank
+            == ProcessingStates.FAILURE_NONRETRYABLE.rank
         )
 
     def test_custom_terminal_state_ranks_like_builtin_terminal(self) -> None:
         cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()
-        assert cloudy.rank == ProcessingState.FAILURE_NONRETRYABLE.rank
+        assert cloudy.rank == ProcessingStates.FAILURE_NONRETRYABLE.rank
 
 
 class TestRetryPolicy:
@@ -115,55 +117,55 @@ class TestIsTerminal:
     def test_success_is_always_terminal(self) -> None:
         """SUCCESS is always terminal regardless of attempt count."""
         policy = RetryPolicy(max_attempts=3)
-        assert ProcessingState.SUCCESS.is_terminal(1, policy)
-        assert ProcessingState.SUCCESS.is_terminal(2, policy)
-        assert ProcessingState.SUCCESS.is_terminal(3, policy)
+        assert ProcessingStates.SUCCESS.is_terminal(1, policy)
+        assert ProcessingStates.SUCCESS.is_terminal(2, policy)
+        assert ProcessingStates.SUCCESS.is_terminal(3, policy)
 
     def test_failure_nonretryable_is_always_terminal(self) -> None:
         """FAILURE_NONRETRYABLE is always terminal."""
         policy = RetryPolicy(max_attempts=3)
-        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal(1, policy)
-        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal(2, policy)
-        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal(3, policy)
+        assert ProcessingStates.FAILURE_NONRETRYABLE.is_terminal(1, policy)
+        assert ProcessingStates.FAILURE_NONRETRYABLE.is_terminal(2, policy)
+        assert ProcessingStates.FAILURE_NONRETRYABLE.is_terminal(3, policy)
 
     def test_failure_retryable_not_terminal_below_max_attempts(self) -> None:
         """FAILURE_RETRYABLE is not terminal when attempt < max_attempts."""
         policy = RetryPolicy(max_attempts=3)
-        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(1, policy)
-        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(2, policy)
+        assert not ProcessingStates.FAILURE_RETRYABLE.is_terminal(1, policy)
+        assert not ProcessingStates.FAILURE_RETRYABLE.is_terminal(2, policy)
 
     def test_failure_retryable_terminal_at_max_attempts(self) -> None:
         """FAILURE_RETRYABLE is terminal when attempt >= max_attempts."""
         policy = RetryPolicy(max_attempts=3)
-        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(3, policy)
+        assert ProcessingStates.FAILURE_RETRYABLE.is_terminal(3, policy)
 
     def test_failure_retryable_terminal_above_max_attempts(self) -> None:
         """FAILURE_RETRYABLE is terminal when attempt > max_attempts."""
         policy = RetryPolicy(max_attempts=3)
-        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(4, policy)
+        assert ProcessingStates.FAILURE_RETRYABLE.is_terminal(4, policy)
 
     def test_submitted_not_terminal(self) -> None:
         """SUBMITTED is never terminal."""
         policy = RetryPolicy(max_attempts=3)
-        assert not ProcessingState.SUBMITTED.is_terminal(1, policy)
-        assert not ProcessingState.SUBMITTED.is_terminal(3, policy)
+        assert not ProcessingStates.SUBMITTED.is_terminal(1, policy)
+        assert not ProcessingStates.SUBMITTED.is_terminal(3, policy)
 
     def test_awaiting_not_terminal(self) -> None:
         """AWAITING is never terminal."""
         policy = RetryPolicy(max_attempts=3)
-        assert not ProcessingState.AWAITING.is_terminal(1, policy)
-        assert not ProcessingState.AWAITING.is_terminal(3, policy)
+        assert not ProcessingStates.AWAITING.is_terminal(1, policy)
+        assert not ProcessingStates.AWAITING.is_terminal(3, policy)
 
     def test_is_terminal_with_different_max_attempts(self) -> None:
         """Test is_terminal with different max_attempts values."""
         policy_2 = RetryPolicy(max_attempts=2)
         policy_5 = RetryPolicy(max_attempts=5)
 
-        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(1, policy_2)
-        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(2, policy_2)
+        assert not ProcessingStates.FAILURE_RETRYABLE.is_terminal(1, policy_2)
+        assert ProcessingStates.FAILURE_RETRYABLE.is_terminal(2, policy_2)
 
-        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal(4, policy_5)
-        assert ProcessingState.FAILURE_RETRYABLE.is_terminal(5, policy_5)
+        assert not ProcessingStates.FAILURE_RETRYABLE.is_terminal(4, policy_5)
+        assert ProcessingStates.FAILURE_RETRYABLE.is_terminal(5, policy_5)
 
     def test_custom_nonretryable_outcome_always_terminal(self) -> None:
         cloudy = ExitCodeOutcome(name="CLOUDY").to_processing_state()

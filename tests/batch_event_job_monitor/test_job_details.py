@@ -7,7 +7,7 @@ from batch_event_job_monitor.job_details import JobDetails
 from batch_event_job_monitor.models import (
     ExitCodeOutcomesBuilder,
     JobContext,
-    ProcessingState,
+    ProcessingStates,
     RetryPolicy,
 )
 
@@ -95,7 +95,7 @@ class TestClassify:
         job_details = JobDetails.from_event(
             make_detail(status="SUCCEEDED", container={"exitCode": 0})
         )
-        assert job_details.classify(RetryPolicy()) == ProcessingState.SUCCESS
+        assert job_details.classify(RetryPolicy()) == ProcessingStates.SUCCESS
 
     def test_failed_with_spot_interruption_status_reason_is_retryable(self) -> None:
         job_details = JobDetails.from_event(
@@ -104,7 +104,7 @@ class TestClassify:
                 statusReason="Host EC2 (instance i-0abcd1234) terminated.",
             )
         )
-        assert job_details.classify(RetryPolicy()) == ProcessingState.FAILURE_RETRYABLE
+        assert job_details.classify(RetryPolicy()) == ProcessingStates.FAILURE_RETRYABLE
 
     def test_failed_with_spot_interruption_from_last_attempt_is_retryable(
         self,
@@ -118,7 +118,7 @@ class TestClassify:
                 ],
             )
         )
-        assert job_details.classify(RetryPolicy()) == ProcessingState.FAILURE_RETRYABLE
+        assert job_details.classify(RetryPolicy()) == ProcessingStates.FAILURE_RETRYABLE
 
     def test_failed_with_different_reason_is_nonretryable(self) -> None:
         job_details = JobDetails.from_event(
@@ -128,13 +128,13 @@ class TestClassify:
             )
         )
         assert (
-            job_details.classify(RetryPolicy()) == ProcessingState.FAILURE_NONRETRYABLE
+            job_details.classify(RetryPolicy()) == ProcessingStates.FAILURE_NONRETRYABLE
         )
 
     def test_failed_with_missing_status_reason_is_nonretryable(self) -> None:
         job_details = JobDetails.from_event(make_detail(status="FAILED"))
         assert (
-            job_details.classify(RetryPolicy()) == ProcessingState.FAILURE_NONRETRYABLE
+            job_details.classify(RetryPolicy()) == ProcessingStates.FAILURE_NONRETRYABLE
         )
 
     def test_failed_uses_custom_retry_policy_prefixes(self) -> None:
@@ -142,16 +142,16 @@ class TestClassify:
             make_detail(status="FAILED", statusReason="Custom reason: retry me")
         )
         policy = RetryPolicy(spot_interruption_status_reason_prefixes=("Custom",))
-        assert job_details.classify(policy) == ProcessingState.FAILURE_RETRYABLE
+        assert job_details.classify(policy) == ProcessingStates.FAILURE_RETRYABLE
 
     def test_submitted_returns_submitted(self) -> None:
         job_details = JobDetails.from_event(make_detail(status="SUBMITTED"))
-        assert job_details.classify(RetryPolicy()) == ProcessingState.SUBMITTED
+        assert job_details.classify(RetryPolicy()) == ProcessingStates.SUBMITTED
 
     @pytest.mark.parametrize("status", ["PENDING", "RUNNABLE", "STARTING", "RUNNING"])
     def test_in_flight_status_returns_awaiting(self, status: str) -> None:
         job_details = JobDetails.from_event(make_detail(status=status))
-        assert job_details.classify(RetryPolicy()) == ProcessingState.AWAITING
+        assert job_details.classify(RetryPolicy()) == ProcessingStates.AWAITING
 
     def test_unrecognized_status_raises_value_error(self) -> None:
         job_details = JobDetails.from_event(make_detail(status="BOGUS"))
@@ -193,12 +193,12 @@ class TestClassifyExitCodeOutcomes:
         outcomes = ExitCodeOutcomesBuilder().add(4, "CLOUDY").build()
         job_details = JobDetails.from_event(self._detail(exit_code=1))
         state = job_details.classify(RetryPolicy(), outcomes)
-        assert state == ProcessingState.FAILURE_NONRETRYABLE
+        assert state == ProcessingStates.FAILURE_NONRETRYABLE
 
     def test_no_exit_code_outcomes_falls_back_to_default_classification(self) -> None:
         job_details = JobDetails.from_event(self._detail(exit_code=4))
         state = job_details.classify(RetryPolicy())
-        assert state == ProcessingState.FAILURE_NONRETRYABLE
+        assert state == ProcessingStates.FAILURE_NONRETRYABLE
 
     def test_spot_interruption_fallback_still_applies_when_no_outcome_matches(
         self,
@@ -211,7 +211,7 @@ class TestClassifyExitCodeOutcomes:
             )
         )
         state = job_details.classify(RetryPolicy(), outcomes)
-        assert state == ProcessingState.FAILURE_RETRYABLE
+        assert state == ProcessingStates.FAILURE_RETRYABLE
 
 
 class TestParameters:

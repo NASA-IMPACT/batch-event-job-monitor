@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import json
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, ClassVar
+from typing import Any
 
 
 class _Kind(enum.Enum):
@@ -26,8 +26,8 @@ class ProcessingState:
     """A job's processing state.
 
     Not a closed enum. SUBMITTED/AWAITING/SUCCESS/FAILURE_RETRYABLE/
-    FAILURE_NONRETRYABLE are provided below as module-level instances for
-    the built-in lifecycle, but a job_type's ExitCodeOutcomes can produce
+    FAILURE_NONRETRYABLE are provided by ProcessingStates below as the
+    built-in lifecycle, but a job_type's ExitCodeOutcomes can produce
     additional named terminal states (e.g. "CLOUDY") that behave like
     FAILURE_RETRYABLE or FAILURE_NONRETRYABLE for routing/terminality
     purposes while using their own name in the S3 key and canonical
@@ -43,12 +43,6 @@ class ProcessingState:
     name: str
     kind: _Kind
     dlq: bool = True
-
-    SUBMITTED: ClassVar[ProcessingState]
-    AWAITING: ClassVar[ProcessingState]
-    SUCCESS: ClassVar[ProcessingState]
-    FAILURE_RETRYABLE: ClassVar[ProcessingState]
-    FAILURE_NONRETRYABLE: ClassVar[ProcessingState]
 
     @property
     def retryable(self) -> bool:
@@ -86,26 +80,35 @@ class ProcessingState:
         return True
 
 
-ProcessingState.SUBMITTED = ProcessingState(name="SUBMITTED", kind=_Kind.SUBMITTED)
-ProcessingState.AWAITING = ProcessingState(name="AWAITING", kind=_Kind.AWAITING)
-ProcessingState.SUCCESS = ProcessingState(name="SUCCESS", kind=_Kind.SUCCESS)
-ProcessingState.FAILURE_RETRYABLE = ProcessingState(
-    name="FAILURE_RETRYABLE", kind=_Kind.RETRYABLE_FAILURE
-)
-ProcessingState.FAILURE_NONRETRYABLE = ProcessingState(
-    name="FAILURE_NONRETRYABLE", kind=_Kind.NONRETRYABLE_FAILURE
-)
+class ProcessingStates:
+    """Registry of the built-in ProcessingState lifecycle members.
+
+    Kept separate from ProcessingState itself so that class stays a plain
+    value type -- the type flowing through classify()/find_state_pointer()/
+    etc, including job_type-specific custom states that never appear here.
+    """
+
+    SUBMITTED = ProcessingState(name="SUBMITTED", kind=_Kind.SUBMITTED)
+    AWAITING = ProcessingState(name="AWAITING", kind=_Kind.AWAITING)
+    SUCCESS = ProcessingState(name="SUCCESS", kind=_Kind.SUCCESS)
+    FAILURE_RETRYABLE = ProcessingState(
+        name="FAILURE_RETRYABLE", kind=_Kind.RETRYABLE_FAILURE
+    )
+    FAILURE_NONRETRYABLE = ProcessingState(
+        name="FAILURE_NONRETRYABLE", kind=_Kind.NONRETRYABLE_FAILURE
+    )
+
 
 # The bounded set of states a job_type with no custom ExitCodeOutcomes can
 # produce. S3RecordStore's lookup methods scan over this by default; pass
 # ExitCodeOutcomes.states() instead for a job_type that declares custom
 # terminal outcomes, so pointers in those states are found too.
 BASELINE_PROCESSING_STATES: tuple[ProcessingState, ...] = (
-    ProcessingState.SUBMITTED,
-    ProcessingState.AWAITING,
-    ProcessingState.SUCCESS,
-    ProcessingState.FAILURE_RETRYABLE,
-    ProcessingState.FAILURE_NONRETRYABLE,
+    ProcessingStates.SUBMITTED,
+    ProcessingStates.AWAITING,
+    ProcessingStates.SUCCESS,
+    ProcessingStates.FAILURE_RETRYABLE,
+    ProcessingStates.FAILURE_NONRETRYABLE,
 )
 
 

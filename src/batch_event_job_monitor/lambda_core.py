@@ -13,6 +13,7 @@ from batch_event_job_monitor.models import (
     JobContext,
     ProcessingEventRecord,
     ProcessingState,
+    ProcessingStates,
     RetryMessage,
     RetryPolicy,
 )
@@ -95,7 +96,7 @@ def monitor_job(
     old_state = log_store.find_state_pointer(context=context, states=states)
     old_attempt = context.attempt
 
-    if old_state is None and new_state == ProcessingState.SUBMITTED:
+    if old_state is None and new_state == ProcessingStates.SUBMITTED:
         active = log_store.find_active_pointer(
             job_type=context.job_type,
             partition_fields=context.partition_fields,
@@ -152,7 +153,7 @@ def monitor_job(
     if new_state.retryable and not terminal:
         if retry_queue_url is not None:
             sqs_client.send_message(QueueUrl=retry_queue_url, MessageBody=message_body)
-    elif terminal and new_state != ProcessingState.SUCCESS and new_state.dlq:
+    elif terminal and new_state != ProcessingStates.SUCCESS and new_state.dlq:
         if dlq_url is not None:
             sqs_client.send_message(QueueUrl=dlq_url, MessageBody=message_body)
 

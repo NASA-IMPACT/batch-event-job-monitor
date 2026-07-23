@@ -11,6 +11,7 @@ from batch_event_job_monitor.models import (
     JobTypeConfig,
     ProcessingEventRecord,
     ProcessingState,
+    ProcessingStates,
     RetryMessage,
     RetryPolicy,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "JobTypeConfig",
     "ProcessingEventRecord",
     "ProcessingState",
+    "ProcessingStates",
     "RetryMessage",
     "RetryPolicy",
     "S3RecordStore",
