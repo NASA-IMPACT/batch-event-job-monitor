@@ -16,6 +16,7 @@ from batch_event_job_monitor.models import (
     ExitCodeOutcome,
     ExitCodeOutcomesBuilder,
     JobContext,
+    JobGroup,
     ProcessingState,
     ProcessingStates,
     RetryPolicy,
@@ -31,6 +32,14 @@ CONTEXT = JobContext(
     job_type=JOB_TYPE,
     partition_fields=PARTITION_FIELDS,
     input_entity_id=INPUT_ENTITY_ID,
+    output_entity_id=OUTPUT_ENTITY_ID,
+    attempt=0,
+)
+
+JOB_GROUP = JobGroup(
+    job_type=JOB_TYPE,
+    partition_fields=PARTITION_FIELDS,
+    input_entity_ids=[INPUT_ENTITY_ID],
     output_entity_id=OUTPUT_ENTITY_ID,
     attempt=0,
 )
@@ -89,7 +98,7 @@ class TestSuccessPath:
         result = monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -111,7 +120,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -131,7 +140,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -153,7 +162,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -183,7 +192,7 @@ class TestSuccessPath:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -219,7 +228,7 @@ class TestFailureRetryableWithAttemptsRemaining:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -233,7 +242,7 @@ class TestFailureRetryableWithAttemptsRemaining:
         body = json.loads(retry_messages[0]["Body"])
         assert body["job_type"] == JOB_TYPE
         assert body["partition_fields"] == PARTITION_FIELDS
-        assert body["input_entity_id"] == INPUT_ENTITY_ID
+        assert body["input_entity_ids"] == [INPUT_ENTITY_ID]
         assert body["output_entity_id"] == OUTPUT_ENTITY_ID
         assert body["attempt"] == 0
         assert body["batch_job_id"] == "batch-job-123"
@@ -255,7 +264,7 @@ class TestFailureRetryableWithAttemptsRemaining:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -277,7 +286,7 @@ class TestFailureRetryableWithAttemptsRemaining:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=None,
             dlq_url=dlq_url,
@@ -299,6 +308,7 @@ class TestFailureRetryableAttemptsExhausted:
         dlq_url: str,
     ) -> None:
         context = dataclasses.replace(CONTEXT, attempt=3)
+        job_group = dataclasses.replace(JOB_GROUP, attempt=3)
         _seed_awaiting(store, context)
         retry_policy = RetryPolicy(max_attempts=3)
         result = monitor_job(
@@ -306,7 +316,7 @@ class TestFailureRetryableAttemptsExhausted:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            context=context,
+            job_group=job_group,
             retry_policy=retry_policy,
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -321,7 +331,7 @@ class TestFailureRetryableAttemptsExhausted:
         assert len(dlq_messages) == 1
         body = json.loads(dlq_messages[0]["Body"])
         assert body["attempt"] == 3
-        assert body["input_entity_id"] == INPUT_ENTITY_ID
+        assert body["input_entity_ids"] == [INPUT_ENTITY_ID]
 
 
 class TestFailureNonretryable:
@@ -342,7 +352,7 @@ class TestFailureNonretryable:
                 container={"exitCode": 1},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -356,7 +366,7 @@ class TestFailureNonretryable:
         dlq_messages = _receive_all(sqs, dlq_url)
         assert len(dlq_messages) == 1
         body = json.loads(dlq_messages[0]["Body"])
-        assert body["input_entity_id"] == INPUT_ENTITY_ID
+        assert body["input_entity_ids"] == [INPUT_ENTITY_ID]
         assert body["output_entity_id"] == OUTPUT_ENTITY_ID
 
     def test_no_dlq_url_sends_nothing(
@@ -374,7 +384,7 @@ class TestFailureNonretryable:
                 container={"exitCode": 1},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=None,
@@ -399,7 +409,7 @@ class TestDefaultNow:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -430,7 +440,7 @@ class TestFullLifecycle:
         retry_policy = RetryPolicy(max_attempts=3)
         kwargs: dict[str, Any] = dict(
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=retry_policy,
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -495,7 +505,7 @@ class TestFullLifecycle:
         the redundant same-state pointer rewrite should be skipped."""
         kwargs: dict[str, Any] = dict(
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -522,6 +532,7 @@ class TestFullLifecycle:
         (exhausted) attempt's FAILURE_RETRYABLE pointer -- a cross-attempt
         transition, since state pointers are keyed per attempt."""
         old_context = dataclasses.replace(CONTEXT, attempt=3)
+        old_job_group = dataclasses.replace(JOB_GROUP, attempt=3)
         _seed_awaiting(store, old_context)
         retry_policy = RetryPolicy(max_attempts=3)
         monitor_job(
@@ -529,7 +540,7 @@ class TestFullLifecycle:
                 status="FAILED", statusReason="Host EC2 instance terminated"
             ),
             log_store=store,
-            context=old_context,
+            job_group=old_job_group,
             retry_policy=retry_policy,
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -542,10 +553,11 @@ class TestFullLifecycle:
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 1
 
         new_context = dataclasses.replace(CONTEXT, attempt=4)
+        new_job_group = dataclasses.replace(JOB_GROUP, attempt=4)
         result = monitor_job(
             detail=make_detail(status="SUBMITTED"),
             log_store=store,
-            context=new_context,
+            job_group=new_job_group,
             retry_policy=retry_policy,
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -576,7 +588,7 @@ class TestMonotonicityGuard:
         pointer, though it is still appended to the canonical record."""
         kwargs: dict[str, Any] = dict(
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
@@ -618,16 +630,22 @@ class TestMonotonicityGuard:
         )
         context_1 = dataclasses.replace(CONTEXT, attempt=1)
         context_2 = dataclasses.replace(CONTEXT, attempt=2)
+        job_group_1 = dataclasses.replace(JOB_GROUP, attempt=1)
+        job_group_2 = dataclasses.replace(JOB_GROUP, attempt=2)
 
         spot_detail = make_detail(
             status="FAILED", statusReason="Host EC2 instance terminated"
         )
-        monitor_job(detail=make_detail(status="SUBMITTED"), context=context_1, **kwargs)
-        monitor_job(detail=spot_detail, context=context_1, **kwargs)
-        monitor_job(detail=make_detail(status="SUBMITTED"), context=context_2, **kwargs)
+        monitor_job(
+            detail=make_detail(status="SUBMITTED"), job_group=job_group_1, **kwargs
+        )
+        monitor_job(detail=spot_detail, job_group=job_group_1, **kwargs)
+        monitor_job(
+            detail=make_detail(status="SUBMITTED"), job_group=job_group_2, **kwargs
+        )
         _receive_all(sqs, retry_queue_url)  # drain the attempt-1 retry message
 
-        result = monitor_job(detail=spot_detail, context=context_1, **kwargs)
+        result = monitor_job(detail=spot_detail, job_group=job_group_1, **kwargs)
         assert result is ProcessingStates.FAILURE_RETRYABLE
 
         assert store.find_state_pointer(context=context_1) is None
@@ -642,6 +660,170 @@ class TestMonotonicityGuard:
             "FAILURE_RETRYABLE",
             "FAILURE_RETRYABLE",
         ]
+
+
+class TestMultiEntityGroup:
+    """monitor_job classifies once per job_group but writes a canonical
+    record/state pointer per entity -- e.g. twin granules or many source
+    granules composited into one output."""
+
+    GRANULE_A = "granule_a"
+    GRANULE_B = "granule_b"
+    TWIN_JOB_GROUP = JobGroup(
+        job_type=JOB_TYPE,
+        partition_fields=PARTITION_FIELDS,
+        input_entity_ids=[GRANULE_A, GRANULE_B],
+        output_entity_id=OUTPUT_ENTITY_ID,
+        attempt=0,
+    )
+    CONTEXT_A = JobContext(
+        job_type=JOB_TYPE,
+        partition_fields=PARTITION_FIELDS,
+        input_entity_id=GRANULE_A,
+        output_entity_id=OUTPUT_ENTITY_ID,
+        attempt=0,
+    )
+    CONTEXT_B = JobContext(
+        job_type=JOB_TYPE,
+        partition_fields=PARTITION_FIELDS,
+        input_entity_id=GRANULE_B,
+        output_entity_id=OUTPUT_ENTITY_ID,
+        attempt=0,
+    )
+
+    def test_writes_separate_canonical_record_and_pointer_per_entity(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        _seed_awaiting(store, self.CONTEXT_A)
+        _seed_awaiting(store, self.CONTEXT_B)
+        monitor_job(
+            detail=make_detail(status="SUCCEEDED"),
+            log_store=store,
+            job_group=self.TWIN_JOB_GROUP,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+
+        for context in (self.CONTEXT_A, self.CONTEXT_B):
+            resp = s3.get_object(
+                Bucket=bucket, Key=S3RecordStore.canonical_key(context)
+            )
+            record = json.loads(resp["Body"].read())
+            assert record["current_state"] == "SUCCESS"
+            assert record["batch_job_id"] == "batch-job-123"
+
+            success_key = S3RecordStore.state_pointer_key(
+                ProcessingStates.SUCCESS, context
+            )
+            assert (
+                s3.list_objects_v2(Bucket=bucket, Prefix=success_key).get("KeyCount", 0)
+                == 1
+            )
+            awaiting_key = S3RecordStore.state_pointer_key(
+                ProcessingStates.AWAITING, context
+            )
+            assert (
+                s3.list_objects_v2(Bucket=bucket, Prefix=awaiting_key).get(
+                    "KeyCount", 0
+                )
+                == 0
+            )
+
+    def test_output_index_written_once_for_shared_output(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        _seed_awaiting(store, self.CONTEXT_A)
+        _seed_awaiting(store, self.CONTEXT_B)
+        monitor_job(
+            detail=make_detail(status="SUCCEEDED"),
+            log_store=store,
+            job_group=self.TWIN_JOB_GROUP,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        key = S3RecordStore.output_index_key(ProcessingStates.SUCCESS, self.CONTEXT_A)
+        assert s3.list_objects_v2(Bucket=bucket, Prefix=key).get("KeyCount", 0) == 1
+
+    def test_retry_message_carries_all_entity_ids(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        _seed_awaiting(store, self.CONTEXT_A)
+        _seed_awaiting(store, self.CONTEXT_B)
+        monitor_job(
+            detail=make_detail(
+                status="FAILED", statusReason="Host EC2 instance terminated"
+            ),
+            log_store=store,
+            job_group=self.TWIN_JOB_GROUP,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        retry_messages = _receive_all(sqs, retry_queue_url)
+        assert len(retry_messages) == 1
+        body = json.loads(retry_messages[0]["Body"])
+        assert body["input_entity_ids"] == [self.GRANULE_A, self.GRANULE_B]
+
+    def test_group_routing_fires_if_any_entity_is_fresh(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        """entity A already terminal (SUCCESS) makes its own SUBMITTED
+        transition stale and skipped, but entity B is brand new -- the
+        group-level routing decision still fires because B was fresh, and
+        A's already-recorded pointer is left untouched."""
+        store.write_state_pointer(
+            context=self.CONTEXT_A, new_state=ProcessingStates.SUCCESS, old_state=None
+        )
+        # CONTEXT_B intentionally not seeded -- brand new entity.
+
+        result = monitor_job(
+            detail=make_detail(status="SUBMITTED"),
+            log_store=store,
+            job_group=self.TWIN_JOB_GROUP,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            now=_fixed_now,
+        )
+        assert result is ProcessingStates.SUBMITTED
+
+        assert store.find_state_pointer(context=self.CONTEXT_A) is (
+            ProcessingStates.SUCCESS
+        )
+        assert store.find_state_pointer(context=self.CONTEXT_B) is (
+            ProcessingStates.SUBMITTED
+        )
 
 
 class TestExitCodeOutcomeRouting:
@@ -660,7 +842,7 @@ class TestExitCodeOutcomeRouting:
                 container={"exitCode": 4},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             exit_code_outcomes=outcomes,
             retry_queue_url=retry_queue_url,
@@ -689,7 +871,7 @@ class TestExitCodeOutcomeRouting:
                 container={"exitCode": 4},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             exit_code_outcomes=outcomes,
             retry_queue_url=retry_queue_url,
@@ -716,7 +898,7 @@ class TestExitCodeOutcomeRouting:
                 container={"exitCode": 4},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             exit_code_outcomes=outcomes,
             retry_queue_url=retry_queue_url,
@@ -746,7 +928,7 @@ class TestExitCodeOutcomeRouting:
                 container={"exitCode": 4},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             exit_code_outcomes=outcomes,
             retry_queue_url=retry_queue_url,
@@ -782,7 +964,7 @@ class TestExitCodeOutcomeRouting:
                 container={"exitCode": 42},
             ),
             log_store=store,
-            context=CONTEXT,
+            job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
             exit_code_outcomes=outcomes,
             retry_queue_url=retry_queue_url,

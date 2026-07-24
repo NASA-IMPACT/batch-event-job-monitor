@@ -21,39 +21,49 @@ for that job's life):
 | Parameter               | Meaning                                                             |
 | ----------------------- | ------------------------------------------------------------------- |
 | `bejm_job_type`         | The job type.                                                       |
-| `bejm_input_entity_id`  | The processed (input) entity identifier.                            |
+| `bejm_input_entity_ids` | JSON-encoded array of processed (input) entity identifiers.         |
 | `bejm_output_entity_id` | The output entity identifier.                                       |
 | `bejm_partition_fields` | JSON-encoded `dict[str, str]` of ordered partition key/value pairs. |
 | `bejm_attempt`          | 1-based attempt number, as a string.                                |
 
-Build these with `JobContext.to_batch_parameters()`:
+`bejm_input_entity_ids` is a list, not a single id, because one Batch job can cover several input entities sharing one
+output -- e.g. twin granules, or several source granules composited into one output. The common case is a single-element
+list.
+
+Build these with `JobGroup.to_batch_parameters()`:
 
 ```python
-from batch_event_job_monitor import JobContext, submit_job
+from batch_event_job_monitor import JobGroup, submit_job
 
-context = JobContext.new(
+job_group = JobGroup.new(
     job_type="monthly-composite",
     partition_fields={"tile_id": "12TVK", "year_month": "2024-06"},
-    input_entity_id="12TVK_2024-06_source",
+    input_entity_ids=["12TVK_2024-06_source"],
     output_entity_id="HLS.COMPOSITE.T12TVK.202406.v2.0",
 )
 submit_job(
     batch_client=batch_client,
-    build_submit_job_params=lambda ctx: {
-        "jobName": ctx.batch_job_name(),
+    build_submit_job_params=lambda group: {
+        "jobName": group.batch_job_name(),
         "jobQueue": "...",
         "jobDefinition": "...",
     },
-    context=context,
+    job_group=job_group,
 )
 ```
 
-`JobContext.batch_job_name()` builds a Batch-safe `jobName` (Batch caps this at 128 characters) from
-`job_type`/`input_entity_id`/`attempt`, truncating and appending a short hash so distinct contexts never collide even
+`JobGroup.batch_job_name()` builds a Batch-safe `jobName` (Batch caps this at 128 characters) from
+`job_type`/`input_entity_ids`/`attempt`, truncating and appending a short hash so distinct groups never collide even
 once truncated.
 
+`monitor_job` classifies a Batch job's outcome once per event (one exit code, one retry/DLQ decision) but writes a
+canonical record and state pointer for each of `input_entity_ids` individually -- see `JobGroup.contexts()`, which fans
+a group out into one `JobContext` per entity.
+
 Resubmitting an already-tracked entity outside the retry-queue flow (e.g. a manual resubmission via the Batch
-console/CLI)? Use `S3RecordStore.next_attempt(...)` to get the correct next `attempt` without hand-computing it.
+console/CLI)? Use `S3RecordStore.next_attempt(...)` (single entity) or `S3RecordStore.next_group_attempt(...)` (a
+multi-entity group -- the max `next_attempt` across all its entities, so a prior partial write failure is still handled
+safely) to get the correct next `attempt` without hand-computing it.
 
 ## Batteries included: `JobMonitorFunction`
 
@@ -109,8 +119,8 @@ default) -- every outcome must state its routing intent explicitly.
 ## Library-only path
 
 For consumers who need custom logic the bundled handler can't express, the underlying functions are all directly
-importable: `monitor_job`, `resubmit_job`, `submit_job`, `JobDetails`, `JobContext`, `S3RecordStore`. Write your own
-Lambda handler and wire it up yourself.
+importable: `monitor_job`, `resubmit_job`, `submit_job`, `JobDetails`, `JobGroup`, `JobContext`, `S3RecordStore`. Write
+your own Lambda handler and wire it up yourself.
 
 ## Resubmitting jobs: `JobResubmitFunction`
 

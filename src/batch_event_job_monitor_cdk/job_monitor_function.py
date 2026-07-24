@@ -56,10 +56,10 @@ class JobMonitorFunction(Construct):
     """Batteries-included AWS Batch job-monitor Lambda.
 
     Bundles its own handler -- no consumer-authored Lambda code is needed
-    for the common case. Consumers set JobContext.to_batch_parameters() on
+    for the common case. Consumers set JobGroup.to_batch_parameters() on
     their Batch SubmitJobRequest.parameters (directly, via resubmit_job, or
     for ad hoc/backfill submissions) so this Lambda can reconstruct the
-    JobContext from each EventBridge job state-change event.
+    JobGroup from each EventBridge job state-change event.
 
     No job_type prop: one instance can monitor multiple job types sharing a
     bucket, since job_type is self-describing per event. Each job_type's

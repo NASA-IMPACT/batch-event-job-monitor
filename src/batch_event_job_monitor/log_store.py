@@ -492,3 +492,47 @@ class S3RecordStore:
             states=states,
         )
         return 1 if active is None else active[1] + 1
+
+    def next_group_attempt(
+        self,
+        *,
+        job_type: str,
+        partition_fields: dict[str, str],
+        input_entity_ids: Iterable[str],
+        states: Iterable[ProcessingState] = BASELINE_PROCESSING_STATES,
+    ) -> int:
+        """Compute the next attempt number for a JobGroup's entire entity set.
+
+        Convenience wrapper over next_attempt for ad hoc/backfill
+        submitters of multi-entity jobs (e.g. twin granules, or many
+        source granules composited into one output): the max next_attempt
+        across all given entities, so a prior attempt where only some
+        entities' writes landed (a partial failure) is still handled
+        safely -- every entity in the new attempt gets the same attempt
+        number, one greater than the furthest-along entity's.
+
+        Parameters
+        ----------
+        job_type : str
+            The job type.
+        partition_fields : dict[str, str]
+            Ordered partition key/value pairs.
+        input_entity_ids : Iterable[str]
+            The processed entity identifiers for this job group.
+        states : Iterable[ProcessingState], optional
+            The bounded set of states to check -- see find_state_pointer.
+
+        Returns
+        -------
+        int
+            The maximum next_attempt() across all given entities.
+        """
+        return max(
+            self.next_attempt(
+                job_type=job_type,
+                partition_fields=partition_fields,
+                input_entity_id=input_entity_id,
+                states=states,
+            )
+            for input_entity_id in input_entity_ids
+        )

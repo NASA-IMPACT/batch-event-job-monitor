@@ -149,11 +149,37 @@ _JOB_NAME_HASH_LENGTH = 8
 
 @dataclass(frozen=True)
 class JobContext:
-    """Identifying and partitioning fields for a job processing event."""
+    """Identifying and partitioning fields for one input entity's
+    processing event.
+
+    A Batch job may cover several input entities sharing one output (see
+    JobGroup, e.g. twin granules or many source granules composited into
+    one output) -- JobContext is the per-entity unit each gets its own
+    canonical record/state pointer under, built via JobGroup.contexts().
+    """
 
     job_type: str
     partition_fields: dict[str, str]
     input_entity_id: str
+    output_entity_id: str
+    attempt: int
+
+
+@dataclass(frozen=True)
+class JobGroup:
+    """A Batch job's full identity, covering however many input entities it
+    processes.
+
+    One for the common case; several for many-to-one jobs (twin granules,
+    or many source granules composited into one output). One
+    classification and one retry decision apply to the whole group, but
+    each entity still gets its own canonical record/state pointer -- see
+    `contexts()`.
+    """
+
+    job_type: str
+    partition_fields: dict[str, str]
+    input_entity_ids: list[str]
     output_entity_id: str
     attempt: int
 
@@ -163,44 +189,58 @@ class JobContext:
         *,
         job_type: str,
         partition_fields: dict[str, str],
-        input_entity_id: str,
+        input_entity_ids: list[str],
         output_entity_id: str,
-    ) -> JobContext:
-        """Build a JobContext for a brand-new entity, at attempt 1."""
+    ) -> JobGroup:
+        """Build a JobGroup for brand-new entities, at attempt 1."""
         return cls(
             job_type=job_type,
             partition_fields=partition_fields,
-            input_entity_id=input_entity_id,
+            input_entity_ids=input_entity_ids,
             output_entity_id=output_entity_id,
             attempt=1,
         )
 
-    def next_attempt(self) -> JobContext:
-        """This context's entity, advanced to its next attempt."""
+    def next_attempt(self) -> JobGroup:
+        """This group, advanced to its next attempt."""
         return replace(self, attempt=self.attempt + 1)
 
+    def contexts(self) -> list[JobContext]:
+        """One JobContext per input entity, sharing this group's identity."""
+        return [
+            JobContext(
+                job_type=self.job_type,
+                partition_fields=self.partition_fields,
+                input_entity_id=input_entity_id,
+                output_entity_id=self.output_entity_id,
+                attempt=self.attempt,
+            )
+            for input_entity_id in self.input_entity_ids
+        ]
+
     def batch_job_name(self) -> str:
-        """A Batch-safe jobName for this context, bounded to 128 chars.
+        """A Batch-safe jobName for this group, bounded to 128 chars.
 
         AWS Batch caps jobName at 128 characters. Appends a short hash of
-        (job_type, input_entity_id, attempt) and truncates the
-        human-readable prefix to fit, so distinct contexts never collide
+        (job_type, input_entity_ids, attempt) and truncates the
+        human-readable prefix to fit, so distinct groups never collide
         even once truncated.
         """
+        entity_ids = ",".join(self.input_entity_ids)
         digest = hashlib.sha256(
-            f"{self.job_type}:{self.input_entity_id}:{self.attempt}".encode()
+            f"{self.job_type}:{entity_ids}:{self.attempt}".encode()
         ).hexdigest()[:_JOB_NAME_HASH_LENGTH]
         suffix = f"-{digest}"
-        prefix = f"{self.job_type}-{self.input_entity_id}-{self.attempt}"
+        prefix = f"{self.job_type}-{entity_ids}-{self.attempt}"
         return prefix[: _MAX_BATCH_JOB_NAME_LENGTH - len(suffix)] + suffix
 
     def to_batch_parameters(self) -> dict[str, str]:
-        """Encode this context as AWS Batch SubmitJobRequest.parameters.
+        """Encode this group as AWS Batch SubmitJobRequest.parameters.
 
         Consumers merge these into their own `parameters` dict when calling
         `submit_job` (directly, or via `resubmit_job`) so that
-        JobMonitorFunction's bundled handler can reconstruct the
-        JobContext from the EventBridge job state-change event with no
+        JobMonitorFunction's bundled handler can reconstruct the JobGroup
+        from the EventBridge job state-change event with no
         consumer-authored Lambda code.
 
         AWS Batch echoes `parameters` back into the event `detail` for
@@ -208,7 +248,7 @@ class JobContext:
         """
         return {
             f"{_PARAM_PREFIX}job_type": self.job_type,
-            f"{_PARAM_PREFIX}input_entity_id": self.input_entity_id,
+            f"{_PARAM_PREFIX}input_entity_ids": json.dumps(self.input_entity_ids),
             f"{_PARAM_PREFIX}output_entity_id": self.output_entity_id,
             f"{_PARAM_PREFIX}partition_fields": json.dumps(
                 self.partition_fields, sort_keys=True
@@ -389,34 +429,34 @@ class JobTypeConfig:
 class RetryMessage:
     """SQS message body for the retry queue / DLQ.
 
-    Fields are flat (mirroring JobContext's own fields plus batch_job_id
-    and state) rather than nesting a `context: JobContext` field, so the
-    JSON wire format stays a single flat object instead of nesting
-    `context` under its own key.
+    Fields are flat (mirroring JobGroup's own fields plus batch_job_id and
+    state) rather than nesting a `job_group: JobGroup` field, so the JSON
+    wire format stays a single flat object instead of nesting `job_group`
+    under its own key.
     """
 
     job_type: str
     partition_fields: dict[str, str]
-    input_entity_id: str
+    input_entity_ids: list[str]
     output_entity_id: str
     attempt: int
     batch_job_id: str
     state: str
 
     @classmethod
-    def from_context(
-        cls, context: JobContext, *, batch_job_id: str, state: str
+    def from_job_group(
+        cls, job_group: JobGroup, *, batch_job_id: str, state: str
     ) -> RetryMessage:
-        """Build a RetryMessage from a JobContext plus the Batch job id and state."""
-        return cls(**asdict(context), batch_job_id=batch_job_id, state=state)
+        """Build a RetryMessage from a JobGroup plus the Batch job id and state."""
+        return cls(**asdict(job_group), batch_job_id=batch_job_id, state=state)
 
     @property
-    def context(self) -> JobContext:
-        """The JobContext this message was built from."""
-        return JobContext(
+    def job_group(self) -> JobGroup:
+        """The JobGroup this message was built from."""
+        return JobGroup(
             job_type=self.job_type,
             partition_fields=self.partition_fields,
-            input_entity_id=self.input_entity_id,
+            input_entity_ids=self.input_entity_ids,
             output_entity_id=self.output_entity_id,
             attempt=self.attempt,
         )

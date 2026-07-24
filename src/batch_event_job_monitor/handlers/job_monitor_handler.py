@@ -2,7 +2,7 @@
 
 Fully generic -- no consumer-authored Python is required for the common
 case. Every input comes from the EventBridge event itself (via
-JobDetails.decode_context, decoding the bejm_* Batch parameters) or
+JobDetails.decode_job_group, decoding the bejm_* Batch parameters) or
 environment variables the JobMonitorFunction CDK construct sets.
 """
 
@@ -35,15 +35,15 @@ def handler(event: EventBridgeEvent, context: Context) -> dict[str, str]:
     """Classify and record a single aws.batch job state change event."""
     detail = event["detail"]
     job = JobDetails.from_event(detail)
-    job_context = job.decode_context()
+    job_group = job.decode_job_group()
 
-    config = _job_type_config(job_context.job_type)
+    config = _job_type_config(job_group.job_type)
     log_store = S3RecordStore(bucket=os.environ["PROCESSING_BUCKET_NAME"])
 
     new_state = monitor_job(
         detail=detail,
         log_store=log_store,
-        context=job_context,
+        job_group=job_group,
         retry_policy=config.retry_policy,
         exit_code_outcomes=config.exit_code_outcomes,
         retry_queue_url=os.environ.get("JOB_RETRY_QUEUE_URL"),

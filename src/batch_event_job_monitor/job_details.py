@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from batch_event_job_monitor.models import (
     ExitCodeOutcomes,
-    JobContext,
+    JobGroup,
     ProcessingState,
     ProcessingStates,
     RetryPolicy,
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 _PARAM_PREFIX = "bejm_"
 _REQUIRED_PARAM_KEYS = (
     "job_type",
-    "input_entity_id",
+    "input_entity_ids",
     "output_entity_id",
     "partition_fields",
     "attempt",
@@ -142,8 +142,8 @@ class JobDetails:
         """AWS Batch SubmitJobRequest.parameters echoed back on this job."""
         return self._typed_raw.get("parameters") or {}
 
-    def decode_context(self) -> JobContext:
-        """Decode the JobContext from this job's Batch parameters.
+    def decode_job_group(self) -> JobGroup:
+        """Decode the JobGroup from this job's Batch parameters.
 
         Raises
         ------
@@ -169,7 +169,7 @@ class JobDetails:
             raise ValueError(
                 f"Batch job {self.job_id!r} is missing required monitoring "
                 f"parameters: {', '.join(missing)}. Set these via "
-                "JobContext.to_batch_parameters() on SubmitJobRequest.parameters "
+                "JobGroup.to_batch_parameters() on SubmitJobRequest.parameters "
                 "when submitting jobs monitored by JobMonitorFunction."
             )
 
@@ -194,10 +194,27 @@ class JobDetails:
                 f"decode to an object, got {type(partition_fields).__name__}"
             )
 
-        return JobContext(
+        try:
+            input_entity_ids = json.loads(stripped["input_entity_ids"])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}input_entity_ids is "
+                "not valid JSON"
+            ) from exc
+        if not (
+            isinstance(input_entity_ids, list)
+            and input_entity_ids
+            and all(isinstance(entity_id, str) for entity_id in input_entity_ids)
+        ):
+            raise ValueError(
+                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}input_entity_ids must "
+                "decode to a non-empty array of strings"
+            )
+
+        return JobGroup(
             job_type=stripped["job_type"],
             partition_fields=partition_fields,
-            input_entity_id=stripped["input_entity_id"],
+            input_entity_ids=input_entity_ids,
             output_entity_id=stripped["output_entity_id"],
             attempt=attempt,
         )

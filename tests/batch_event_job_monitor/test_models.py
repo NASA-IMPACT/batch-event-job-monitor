@@ -8,6 +8,7 @@ from batch_event_job_monitor.models import (
     ExitCodeOutcomes,
     ExitCodeOutcomesBuilder,
     JobContext,
+    JobGroup,
     JobTypeConfig,
     ProcessingEventRecord,
     ProcessingStates,
@@ -267,28 +268,9 @@ class TestProcessingEventRecord:
 
 
 class TestJobContext:
-    """Tests for JobContext.to_batch_parameters."""
+    """Tests for the JobContext per-entity value object."""
 
-    def test_new_defaults_to_attempt_one(self) -> None:
-        context = JobContext.new(
-            job_type="monthly-composite",
-            partition_fields={"tile_id": "12TVK"},
-            input_entity_id="12TVK_2024-06_source",
-            output_entity_id="12TVK_2024-06_output",
-        )
-        assert context.attempt == 1
-
-    def test_next_attempt_increments(self) -> None:
-        context = JobContext(
-            job_type="monthly-composite",
-            partition_fields={"tile_id": "12TVK"},
-            input_entity_id="12TVK_2024-06_source",
-            output_entity_id="12TVK_2024-06_output",
-            attempt=2,
-        )
-        assert context.next_attempt().attempt == 3
-
-    def test_next_attempt_preserves_other_fields(self) -> None:
+    def test_holds_identity_fields(self) -> None:
         context = JobContext(
             job_type="monthly-composite",
             partition_fields={"tile_id": "12TVK"},
@@ -296,24 +278,58 @@ class TestJobContext:
             output_entity_id="12TVK_2024-06_output",
             attempt=1,
         )
-        next_context = context.next_attempt()
-        assert next_context.job_type == context.job_type
-        assert next_context.partition_fields == context.partition_fields
-        assert next_context.input_entity_id == context.input_entity_id
-        assert next_context.output_entity_id == context.output_entity_id
+        assert context.job_type == "monthly-composite"
+        assert context.input_entity_id == "12TVK_2024-06_source"
 
-    def test_encodes_all_identity_fields(self) -> None:
-        context = JobContext(
+
+class TestJobGroup:
+    """Tests for JobGroup.to_batch_parameters and .contexts."""
+
+    def test_new_defaults_to_attempt_one(self) -> None:
+        group = JobGroup.new(
             job_type="monthly-composite",
-            partition_fields={"tile_id": "12TVK", "year_month": "2024-06"},
-            input_entity_id="12TVK_2024-06_source",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_ids=["12TVK_2024-06_source"],
+            output_entity_id="12TVK_2024-06_output",
+        )
+        assert group.attempt == 1
+
+    def test_next_attempt_increments(self) -> None:
+        group = JobGroup(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_ids=["12TVK_2024-06_source"],
             output_entity_id="12TVK_2024-06_output",
             attempt=2,
         )
-        params = context.to_batch_parameters()
+        assert group.next_attempt().attempt == 3
+
+    def test_next_attempt_preserves_other_fields(self) -> None:
+        group = JobGroup(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_ids=["12TVK_2024-06_source"],
+            output_entity_id="12TVK_2024-06_output",
+            attempt=1,
+        )
+        next_group = group.next_attempt()
+        assert next_group.job_type == group.job_type
+        assert next_group.partition_fields == group.partition_fields
+        assert next_group.input_entity_ids == group.input_entity_ids
+        assert next_group.output_entity_id == group.output_entity_id
+
+    def test_encodes_all_identity_fields(self) -> None:
+        group = JobGroup(
+            job_type="monthly-composite",
+            partition_fields={"tile_id": "12TVK", "year_month": "2024-06"},
+            input_entity_ids=["12TVK_2024-06_source"],
+            output_entity_id="12TVK_2024-06_output",
+            attempt=2,
+        )
+        params = group.to_batch_parameters()
         assert params == {
             "bejm_job_type": "monthly-composite",
-            "bejm_input_entity_id": "12TVK_2024-06_source",
+            "bejm_input_entity_ids": json.dumps(["12TVK_2024-06_source"]),
             "bejm_output_entity_id": "12TVK_2024-06_output",
             "bejm_partition_fields": json.dumps(
                 {"tile_id": "12TVK", "year_month": "2024-06"}, sort_keys=True
@@ -322,104 +338,140 @@ class TestJobContext:
         }
 
     def test_partition_fields_round_trips_through_json(self) -> None:
-        context = JobContext(
+        group = JobGroup(
             job_type="job",
             partition_fields={"b": "2", "a": "1"},
-            input_entity_id="e",
+            input_entity_ids=["e"],
             output_entity_id="o",
             attempt=1,
         )
-        params = context.to_batch_parameters()
+        params = group.to_batch_parameters()
         assert json.loads(params["bejm_partition_fields"]) == {"a": "1", "b": "2"}
+
+    def test_input_entity_ids_round_trips_through_json(self) -> None:
+        group = JobGroup(
+            job_type="job",
+            partition_fields={},
+            input_entity_ids=["a", "b"],
+            output_entity_id="o",
+            attempt=1,
+        )
+        params = group.to_batch_parameters()
+        assert json.loads(params["bejm_input_entity_ids"]) == ["a", "b"]
+
+    def test_contexts_fans_out_one_per_entity(self) -> None:
+        group = JobGroup(
+            job_type="job",
+            partition_fields={"tile_id": "12TVK"},
+            input_entity_ids=["a", "b"],
+            output_entity_id="o",
+            attempt=1,
+        )
+        contexts = group.contexts()
+        assert [c.input_entity_id for c in contexts] == ["a", "b"]
+        assert all(c.job_type == "job" for c in contexts)
+        assert all(c.partition_fields == {"tile_id": "12TVK"} for c in contexts)
+        assert all(c.output_entity_id == "o" for c in contexts)
+        assert all(c.attempt == 1 for c in contexts)
 
 
 class TestBatchJobName:
-    """Tests for JobContext.batch_job_name."""
+    """Tests for JobGroup.batch_job_name."""
 
     def test_short_name_within_limit_includes_hash_suffix(self) -> None:
-        context = JobContext(
+        group = JobGroup(
             job_type="monthly-composite",
             partition_fields={"tile_id": "12TVK"},
-            input_entity_id="12TVK_2024-06_source",
+            input_entity_ids=["12TVK_2024-06_source"],
             output_entity_id="12TVK_2024-06_output",
             attempt=1,
         )
-        name = context.batch_job_name()
+        name = group.batch_job_name()
         assert len(name) <= 128
         assert name.startswith("monthly-composite-12TVK_2024-06_source-1-")
 
     def test_long_name_truncated_to_128_chars(self) -> None:
-        context = JobContext(
+        group = JobGroup(
             job_type="a" * 200,
             partition_fields={},
-            input_entity_id="b" * 200,
+            input_entity_ids=["b" * 200],
             output_entity_id="o",
             attempt=1,
         )
-        name = context.batch_job_name()
+        name = group.batch_job_name()
         assert len(name) == 128
 
-    def test_deterministic_for_same_context(self) -> None:
-        context = JobContext(
+    def test_deterministic_for_same_group(self) -> None:
+        group = JobGroup(
             job_type="job",
             partition_fields={},
-            input_entity_id="entity",
+            input_entity_ids=["entity"],
             output_entity_id="o",
             attempt=1,
         )
-        assert context.batch_job_name() == context.batch_job_name()
+        assert group.batch_job_name() == group.batch_job_name()
 
     def test_distinct_attempts_produce_distinct_names(self) -> None:
-        context = JobContext(
+        group = JobGroup(
             job_type="job",
             partition_fields={},
-            input_entity_id="entity",
+            input_entity_ids=["entity"],
             output_entity_id="o",
             attempt=1,
         )
-        assert context.batch_job_name() != context.next_attempt().batch_job_name()
+        assert group.batch_job_name() != group.next_attempt().batch_job_name()
 
     def test_names_still_distinct_after_truncation(self) -> None:
-        base = JobContext(
+        base = JobGroup(
             job_type="a" * 200,
             partition_fields={},
-            input_entity_id="b" * 200,
+            input_entity_ids=["b" * 200],
             output_entity_id="o",
             attempt=1,
         )
         other = replace(base, attempt=2)
         assert base.batch_job_name() != other.batch_job_name()
 
+    def test_includes_all_entity_ids_for_multi_entity_group(self) -> None:
+        group = JobGroup(
+            job_type="job",
+            partition_fields={},
+            input_entity_ids=["a", "b"],
+            output_entity_id="o",
+            attempt=1,
+        )
+        assert group.batch_job_name().startswith("job-a,b-1-")
+
 
 class TestRetryMessage:
     """Tests for RetryMessage."""
 
-    def _context(self) -> JobContext:
-        return JobContext(
+    def _job_group(self) -> JobGroup:
+        return JobGroup(
             job_type="monthly-composite",
             partition_fields={"tile_id": "12TVK"},
-            input_entity_id="12TVK_2024-06_source",
+            input_entity_ids=["12TVK_2024-06_source"],
             output_entity_id="12TVK_2024-06_output",
             attempt=1,
         )
 
-    def test_from_context_round_trips_to_context(self) -> None:
-        context = self._context()
-        message = RetryMessage.from_context(
-            context, batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+    def test_from_job_group_round_trips_to_job_group(self) -> None:
+        job_group = self._job_group()
+        message = RetryMessage.from_job_group(
+            job_group, batch_job_id="batch-123", state="FAILURE_RETRYABLE"
         )
-        assert message.context == context
+        assert message.job_group == job_group
         assert message.batch_job_id == "batch-123"
 
     def test_to_json_is_flat(self) -> None:
-        message = RetryMessage.from_context(
-            self._context(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+        message = RetryMessage.from_job_group(
+            self._job_group(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
         )
         body = json.loads(message.to_json())
         assert body == {
             "job_type": "monthly-composite",
             "partition_fields": {"tile_id": "12TVK"},
-            "input_entity_id": "12TVK_2024-06_source",
+            "input_entity_ids": ["12TVK_2024-06_source"],
             "output_entity_id": "12TVK_2024-06_output",
             "attempt": 1,
             "batch_job_id": "batch-123",
@@ -427,14 +479,14 @@ class TestRetryMessage:
         }
 
     def test_from_json_round_trips(self) -> None:
-        message = RetryMessage.from_context(
-            self._context(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+        message = RetryMessage.from_job_group(
+            self._job_group(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
         )
         assert RetryMessage.from_json(message.to_json()) == message
 
     def test_state_round_trips(self) -> None:
-        message = RetryMessage.from_context(
-            self._context(), batch_job_id="batch-123", state="CLOUDY"
+        message = RetryMessage.from_job_group(
+            self._job_group(), batch_job_id="batch-123", state="CLOUDY"
         )
         assert message.state == "CLOUDY"
         assert RetryMessage.from_json(message.to_json()).state == "CLOUDY"

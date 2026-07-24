@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 import boto3
 
-from batch_event_job_monitor import JobContext, RetryMessage, resubmit_job
+from batch_event_job_monitor import JobGroup, RetryMessage, resubmit_job
 from batch_event_job_monitor.models import JobTypeConfig
 
 if TYPE_CHECKING:
@@ -71,18 +71,18 @@ def _job_type_config(job_type: str) -> JobTypeConfig:
     return JobTypeConfig.from_dict(all_configs[job_type])
 
 
-def build_submit_job_params(context: JobContext) -> dict[str, Any]:
+def build_submit_job_params(job_group: JobGroup) -> dict[str, Any]:
     """Return batch_client.submit_job kwargs for the given (new) attempt.
 
     The bejm_* identity parameters are injected by resubmit_job
     automatically -- do not set them here.
     """
-    config = _job_type_config(context.job_type)
+    config = _job_type_config(job_group.job_type)
     return {
-        "jobName": context.batch_job_name(),
+        "jobName": job_group.batch_job_name(),
         "jobQueue": config.job_queue_arn,
         "jobDefinition": config.job_definition_arn,
-        # e.g. containerOverrides computed from context here
+        # e.g. containerOverrides computed from job_group here
     }
 
 
@@ -96,7 +96,7 @@ def handler(event: SQSEvent, context: Context) -> dict[str, list[dict[str, str]]
             resubmit_job(
                 batch_client=_batch_client,
                 build_submit_job_params=build_submit_job_params,
-                context=message.context,
+                job_group=message.job_group,
             )
         except Exception:
             batch_item_failures.append({"itemIdentifier": record["messageId"]})

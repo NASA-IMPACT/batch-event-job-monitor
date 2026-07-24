@@ -10,7 +10,7 @@ from batch_event_job_monitor.job_details import JobDetails
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
     ExitCodeOutcomes,
-    JobContext,
+    JobGroup,
     ProcessingEventRecord,
     ProcessingState,
     ProcessingStates,
@@ -27,7 +27,7 @@ def monitor_job(
     *,
     detail: dict[str, Any],
     log_store: S3RecordStore,
-    context: JobContext,
+    job_group: JobGroup,
     retry_policy: RetryPolicy,
     retry_queue_url: str | None,
     dlq_url: str | None,
@@ -38,16 +38,21 @@ def monitor_job(
     """Classify and record a Batch job state change event, routing failures.
 
     Called for every aws.batch job state change event for a monitored job,
-    not only terminal ones. Classifies the event's status, appends a
-    canonical event, updates the state pointer, writes the output index for
-    terminal outcomes, and routes retryable failures to a retry queue or
-    terminal non-success outcomes to a dead-letter queue.
+    not only terminal ones. Classifies the event once for the whole
+    job_group (one Batch job, one exit code), then appends a canonical
+    event and updates the state pointer for each of the group's entities
+    individually (see JobGroup.contexts()) -- a twin-granule or
+    many-source-to-one-output job still gets one classification/one retry
+    decision, but a canonical record and state pointer per entity. Writes
+    the output index for terminal outcomes (once per group -- its key
+    doesn't vary by entity), and routes retryable failures to a retry
+    queue or terminal non-success outcomes to a dead-letter queue.
 
-    This is the single owner of state tracking: it derives the previous
-    state itself (see below) rather than accepting it from the caller, so
-    ad hoc/backfill job submissions are tracked correctly as long as they
-    set JobContext.to_batch_parameters() on their SubmitJobRequest, with no
-    other library coordination required.
+    This is the single owner of state tracking: it derives each entity's
+    previous state itself (see below) rather than accepting it from the
+    caller, so ad hoc/backfill job submissions are tracked correctly as
+    long as they set JobGroup.to_batch_parameters() on their
+    SubmitJobRequest, with no other library coordination required.
 
     Parameters
     ----------
@@ -57,10 +62,10 @@ def monitor_job(
     log_store : S3RecordStore
         The log store used to record the canonical event, state pointer,
         and output index.
-    context : JobContext
+    job_group : JobGroup
         Identifying and partitioning fields for this job processing event,
         typically decoded from the event via
-        `JobDetails.from_event(detail).decode_context()`.
+        `JobDetails.from_event(detail).decode_job_group()`.
     retry_policy : RetryPolicy
         The retry policy used to classify the outcome and to decide
         terminality.
@@ -93,67 +98,83 @@ def monitor_job(
     job = JobDetails.from_event(detail)
     new_state = job.classify(retry_policy, outcomes)
 
-    old_state = log_store.find_state_pointer(context=context, states=states)
-    old_attempt = context.attempt
-    stale = False
+    contexts = job_group.contexts()
+    any_fresh = False
 
-    if old_state is None:
-        active = log_store.find_active_pointer(
-            job_type=context.job_type,
-            partition_fields=context.partition_fields,
-            input_entity_id=context.input_entity_id,
-            states=states,
+    for context in contexts:
+        old_state = log_store.find_state_pointer(context=context, states=states)
+        old_attempt = context.attempt
+        stale = False
+
+        if old_state is None:
+            active = log_store.find_active_pointer(
+                job_type=context.job_type,
+                partition_fields=context.partition_fields,
+                input_entity_id=context.input_entity_id,
+                states=states,
+            )
+            if active is not None:
+                active_state, active_attempt = active
+                if active_attempt > context.attempt:
+                    # A straggler for an attempt a newer one has already
+                    # superseded (that attempt's own pointer has since
+                    # been retired, so find_state_pointer above found
+                    # nothing).
+                    stale = True
+                else:
+                    old_state, old_attempt = active_state, active_attempt
+
+        event = ProcessingEventRecord(
+            state=new_state.name,
+            timestamp=current_time().isoformat(),
+            batch_job_id=job.job_id,
+            exit_code=job.exit_code,
         )
-        if active is not None:
-            active_state, active_attempt = active
-            if active_attempt > context.attempt:
-                # A straggler for an attempt a newer one has already
-                # superseded (that attempt's own pointer has since been
-                # retired, so find_state_pointer above found nothing).
-                stale = True
-            else:
-                old_state, old_attempt = active_state, active_attempt
+        log_store.append_canonical_event(
+            context=context, event=event, batch_job_id=job.job_id
+        )
 
-    event = ProcessingEventRecord(
-        state=new_state.name,
-        timestamp=current_time().isoformat(),
-        batch_job_id=job.job_id,
-        exit_code=job.exit_code,
-    )
-    log_store.append_canonical_event(
-        context=context, event=event, batch_job_id=job.job_id
-    )
+        # Monotonicity guard: EventBridge does not guarantee delivery
+        # order, so a stale/out-of-order event is possible two ways -- a
+        # straggler for an already-superseded attempt (checked above), or
+        # a same-attempt event ranked below the state already recorded
+        # for this attempt. Either way, the canonical event above still
+        # records it for audit history, but this entity's
+        # pointer/routing side effects are skipped.
+        if stale or (
+            old_attempt == context.attempt
+            and old_state is not None
+            and new_state.rank < old_state.rank
+        ):
+            continue
 
-    # Monotonicity guard: EventBridge does not guarantee delivery order, so
-    # a stale/out-of-order event is possible two ways -- a straggler for an
-    # already-superseded attempt (checked above), or a same-attempt event
-    # ranked below the state already recorded for this attempt. Either way,
-    # the canonical event above still records it for audit history, but the
-    # pointer/output-index/SQS side effects are skipped.
-    if stale or (
-        old_attempt == context.attempt
-        and old_state is not None
-        and new_state.rank < old_state.rank
-    ):
+        any_fresh = True
+
+        # Skip the redundant pointer rewrite when nothing changed (e.g.
+        # PENDING -> RUNNABLE -> STARTING -> RUNNING all map to AWAITING).
+        if not (old_attempt == context.attempt and new_state == old_state):
+            log_store.write_state_pointer(
+                context=context,
+                new_state=new_state,
+                old_state=old_state,
+                old_attempt=old_attempt,
+            )
+
+    # If every entity's event was stale, the whole group's event is stale
+    # too -- skip the group-level output-index write and SQS routing.
+    if not any_fresh:
         return new_state
 
-    # Skip the redundant pointer rewrite when nothing changed (e.g.
-    # PENDING -> RUNNABLE -> STARTING -> RUNNING all map to AWAITING).
-    if not (old_attempt == context.attempt and new_state == old_state):
-        log_store.write_state_pointer(
-            context=context,
-            new_state=new_state,
-            old_state=old_state,
-            old_attempt=old_attempt,
-        )
-
-    terminal = new_state.is_terminal(context.attempt, retry_policy)
+    terminal = new_state.is_terminal(job_group.attempt, retry_policy)
 
     if terminal:
-        log_store.write_output_index(context=context, state=new_state)
+        # output_index_key only depends on job_type/partition_fields/
+        # output_entity_id -- entity-invariant within a group -- so write
+        # it once, not once per entity.
+        log_store.write_output_index(context=contexts[0], state=new_state)
 
-    message_body = RetryMessage.from_context(
-        context, batch_job_id=job.job_id, state=new_state.name
+    message_body = RetryMessage.from_job_group(
+        job_group, batch_job_id=job.job_id, state=new_state.name
     ).to_json()
 
     if new_state.retryable and not terminal:

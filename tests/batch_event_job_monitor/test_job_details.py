@@ -6,7 +6,7 @@ import pytest
 from batch_event_job_monitor.job_details import JobDetails
 from batch_event_job_monitor.models import (
     ExitCodeOutcomesBuilder,
-    JobContext,
+    JobGroup,
     ProcessingStates,
     RetryPolicy,
 )
@@ -224,7 +224,7 @@ class TestParameters:
 def make_bejm_parameters(**overrides: str) -> dict[str, str]:
     params = {
         "bejm_job_type": "monthly-composite",
-        "bejm_input_entity_id": "12TVK_2024-06_source",
+        "bejm_input_entity_ids": json.dumps(["12TVK_2024-06_source"]),
         "bejm_output_entity_id": "12TVK_2024-06_output",
         "bejm_partition_fields": json.dumps({"tile_id": "12TVK"}),
         "bejm_attempt": "1",
@@ -233,24 +233,37 @@ def make_bejm_parameters(**overrides: str) -> dict[str, str]:
     return params
 
 
-class TestDecodeContext:
-    def test_decodes_full_context(self) -> None:
+class TestDecodeJobGroup:
+    def test_decodes_full_job_group(self) -> None:
         job_details = JobDetails.from_event(
             make_detail(parameters=make_bejm_parameters())
         )
-        assert job_details.decode_context() == JobContext(
+        assert job_details.decode_job_group() == JobGroup(
             job_type="monthly-composite",
             partition_fields={"tile_id": "12TVK"},
-            input_entity_id="12TVK_2024-06_source",
+            input_entity_ids=["12TVK_2024-06_source"],
             output_entity_id="12TVK_2024-06_output",
             attempt=1,
         )
+
+    def test_decodes_multiple_input_entity_ids(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                parameters=make_bejm_parameters(
+                    bejm_input_entity_ids=json.dumps(["granule_a", "granule_b"])
+                )
+            )
+        )
+        assert job_details.decode_job_group().input_entity_ids == [
+            "granule_a",
+            "granule_b",
+        ]
 
     @pytest.mark.parametrize(
         "key",
         [
             "bejm_job_type",
-            "bejm_input_entity_id",
+            "bejm_input_entity_ids",
             "bejm_output_entity_id",
             "bejm_partition_fields",
             "bejm_attempt",
@@ -261,16 +274,16 @@ class TestDecodeContext:
         del params[key]
         job_details = JobDetails.from_event(make_detail(parameters=params))
         with pytest.raises(ValueError, match=key):
-            job_details.decode_context()
+            job_details.decode_job_group()
 
     def test_all_keys_missing_lists_all_in_error(self) -> None:
         job_details = JobDetails.from_event(make_detail(parameters={}))
         with pytest.raises(ValueError) as exc_info:
-            job_details.decode_context()
+            job_details.decode_job_group()
         message = str(exc_info.value)
         for key in (
             "bejm_job_type",
-            "bejm_input_entity_id",
+            "bejm_input_entity_ids",
             "bejm_output_entity_id",
             "bejm_partition_fields",
             "bejm_attempt",
@@ -282,7 +295,7 @@ class TestDecodeContext:
             make_detail(parameters=make_bejm_parameters(bejm_attempt="not-a-number"))
         )
         with pytest.raises(ValueError, match="bejm_attempt"):
-            job_details.decode_context()
+            job_details.decode_job_group()
 
     def test_malformed_partition_fields_json_raises(self) -> None:
         job_details = JobDetails.from_event(
@@ -291,11 +304,51 @@ class TestDecodeContext:
             )
         )
         with pytest.raises(ValueError, match="bejm_partition_fields"):
-            job_details.decode_context()
+            job_details.decode_job_group()
 
     def test_partition_fields_not_object_raises(self) -> None:
         job_details = JobDetails.from_event(
             make_detail(parameters=make_bejm_parameters(bejm_partition_fields="[1, 2]"))
         )
         with pytest.raises(ValueError, match="bejm_partition_fields"):
-            job_details.decode_context()
+            job_details.decode_job_group()
+
+    def test_malformed_input_entity_ids_json_raises(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                parameters=make_bejm_parameters(bejm_input_entity_ids="not-json")
+            )
+        )
+        with pytest.raises(ValueError, match="bejm_input_entity_ids"):
+            job_details.decode_job_group()
+
+    def test_input_entity_ids_not_array_raises(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                parameters=make_bejm_parameters(
+                    bejm_input_entity_ids=json.dumps({"a": 1})
+                )
+            )
+        )
+        with pytest.raises(ValueError, match="bejm_input_entity_ids"):
+            job_details.decode_job_group()
+
+    def test_empty_input_entity_ids_raises(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                parameters=make_bejm_parameters(bejm_input_entity_ids=json.dumps([]))
+            )
+        )
+        with pytest.raises(ValueError, match="bejm_input_entity_ids"):
+            job_details.decode_job_group()
+
+    def test_input_entity_ids_with_non_string_element_raises(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                parameters=make_bejm_parameters(
+                    bejm_input_entity_ids=json.dumps(["a", 1])
+                )
+            )
+        )
+        with pytest.raises(ValueError, match="bejm_input_entity_ids"):
+            job_details.decode_job_group()

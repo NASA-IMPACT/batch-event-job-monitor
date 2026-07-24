@@ -466,6 +466,55 @@ class TestNextAttempt:
         assert result == 3
 
 
+class TestNextGroupAttempt:
+    OTHER_ENTITY_ID = "12TVK_2024-06_twin"
+
+    def test_no_active_pointers_returns_one(self, store: S3RecordStore) -> None:
+        result = store.next_group_attempt(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_ids=[INPUT_ENTITY_ID, self.OTHER_ENTITY_ID],
+        )
+        assert result == 1
+
+    def test_returns_max_next_attempt_across_entities(
+        self, store: S3RecordStore
+    ) -> None:
+        store.write_state_pointer(
+            context=make_context(attempt=2),
+            new_state=ProcessingStates.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        store.write_state_pointer(
+            context=make_context(input_entity_id=self.OTHER_ENTITY_ID, attempt=5),
+            new_state=ProcessingStates.AWAITING,
+            old_state=None,
+        )
+        result = store.next_group_attempt(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_ids=[INPUT_ENTITY_ID, self.OTHER_ENTITY_ID],
+        )
+        assert result == 6
+
+    def test_one_entity_with_no_pointer_still_uses_others_max(
+        self, store: S3RecordStore
+    ) -> None:
+        """A partial prior write (only some entities' pointers landed) must
+        not reset the group's next attempt back to 1."""
+        store.write_state_pointer(
+            context=make_context(attempt=4),
+            new_state=ProcessingStates.FAILURE_RETRYABLE,
+            old_state=None,
+        )
+        result = store.next_group_attempt(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_ids=[INPUT_ENTITY_ID, self.OTHER_ENTITY_ID],
+        )
+        assert result == 5
+
+
 class TestWriteStatePointerCrossAttempt:
     def test_old_attempt_deletes_prior_attempt_pointer(
         self, store: S3RecordStore, s3: S3Client
