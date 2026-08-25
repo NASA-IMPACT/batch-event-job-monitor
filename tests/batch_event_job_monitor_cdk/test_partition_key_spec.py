@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from batch_event_job_monitor_cdk.partition_key_spec import (
@@ -118,7 +120,7 @@ class TestPartitionProjectionParameters:
 class TestInjectedKeysInSharedHelpers:
     """An injected key is an ordinary partition key everywhere else."""
 
-    _KEYS = [
+    _KEYS: ClassVar[list[PartitionKeySpec]] = [
         PartitionKeySpec("job_type", "string", "enum", enum_values=("composite",)),
         PartitionKeySpec("tile_id", "string", "injected"),
     ]

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
-from aws_cdk import App, Stack, aws_s3 as s3, aws_sqs as sqs
+from aws_cdk import App, Stack, aws_s3 as s3
 from aws_cdk.assertions import Match, Template
 
 from batch_event_job_monitor.models import (
@@ -14,6 +15,7 @@ from batch_event_job_monitor.models import (
     RetryPolicy,
 )
 from batch_event_job_monitor_cdk.job_monitor_function import JobMonitorFunction
+from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
 
 _JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/queue"
 _JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/def"
@@ -27,24 +29,43 @@ _ONE_JOB_TYPE_CONFIG = {
 
 def _make_stack(
     *,
-    with_retry_queue: bool = False,
-    with_dlq: bool = False,
+    queues: bool = False,
     job_type_configs: dict[str, JobTypeConfig] | None = None,
 ) -> tuple[Stack, JobMonitorFunction]:
     app = App()
     stack = Stack(app, "TestStack")
     bucket = s3.Bucket(stack, "Bucket")
-    retry_queue = sqs.Queue(stack, "RetryQueue") if with_retry_queue else None
-    dlq = sqs.Queue(stack, "Dlq") if with_dlq else None
     construct = JobMonitorFunction(
         stack,
         "TestJobMonitorFunction",
         processing_bucket=bucket,
         job_type_configs=job_type_configs or _ONE_JOB_TYPE_CONFIG,
-        retry_queue=retry_queue,
-        dlq=dlq,
+        queues=MonitoringQueues(stack, "Queues") if queues else None,
     )
     return stack, construct
+
+
+def _rules(template: Template) -> list[dict[str, Any]]:
+    resources = template.to_json()["Resources"]
+    return [
+        r["Properties"] for r in resources.values() if r["Type"] == "AWS::Events::Rule"
+    ]
+
+
+def _tracked_rules(template: Template) -> list[dict[str, Any]]:
+    return [
+        rule
+        for rule in _rules(template)
+        if "jobDefinition" in rule["EventPattern"]["detail"]
+    ]
+
+
+def _untracked_rules(template: Template) -> list[dict[str, Any]]:
+    return [
+        rule
+        for rule in _rules(template)
+        if "jobDefinition" not in rule["EventPattern"]["detail"]
+    ]
 
 
 class TestFunction:
@@ -64,7 +85,7 @@ class TestFunction:
             },
         )
 
-    def test_environment_without_retry_or_dlq_queues(self) -> None:
+    def test_environment(self) -> None:
         stack, _ = _make_stack()
         template = Template.from_stack(stack)
         template.has_resource_properties(
@@ -75,7 +96,31 @@ class TestFunction:
                         {
                             "PROCESSING_BUCKET_NAME": Match.any_value(),
                             "PROCESSING_JOB_TYPE_CONFIGS": Match.any_value(),
+                            "JOB_RETRY_QUEUE_URL": Match.any_value(),
+                            "JOB_FAILURE_DLQ_URL": Match.any_value(),
+                            "MONITOR_METRIC_NAMESPACE": "BatchEventJobMonitor",
                         }
+                    )
+                }
+            },
+        )
+
+    def test_metric_namespace_is_overridable(self) -> None:
+        app = App()
+        stack = Stack(app, "TestStack")
+        JobMonitorFunction(
+            stack,
+            "Monitor",
+            processing_bucket=s3.Bucket(stack, "Bucket"),
+            job_type_configs=_ONE_JOB_TYPE_CONFIG,
+            metric_namespace="MyNamespace",
+        )
+        Template.from_stack(stack).has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": Match.object_like(
+                        {"MONITOR_METRIC_NAMESPACE": "MyNamespace"}
                     )
                 }
             },
@@ -108,26 +153,22 @@ class TestFunction:
             "4": {"name": "CLOUDY", "retryable": False, "dlq": False}
         }
 
-    def test_environment_with_queues(self) -> None:
-        stack, _ = _make_stack(with_retry_queue=True, with_dlq=True)
-        template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Lambda::Function",
-            {
-                "Environment": {
-                    "Variables": Match.object_like(
-                        {
-                            "JOB_RETRY_QUEUE_URL": Match.any_value(),
-                            "JOB_FAILURE_DLQ_URL": Match.any_value(),
-                        }
-                    )
-                }
-            },
-        )
+
+class TestQueues:
+    def test_creates_its_own_queues_by_default(self) -> None:
+        stack, construct = _make_stack()
+        assert isinstance(construct.queues, MonitoringQueues)
+        # retry + retry DLQ + failure DLQ + untracked + event DLQ
+        Template.from_stack(stack).resource_count_is("AWS::SQS::Queue", 5)
+
+    def test_adopts_the_queues_it_is_given(self) -> None:
+        stack, construct = _make_stack(queues=True)
+        assert construct.queues.node.scope is stack
+        Template.from_stack(stack).resource_count_is("AWS::SQS::Queue", 5)
 
 
 class TestIamGrants:
-    def test_s3_read_write_grant_always_present(self) -> None:
+    def test_s3_read_write_grant_present(self) -> None:
         stack, _ = _make_stack()
         template = Template.from_stack(stack)
         template.has_resource_properties(
@@ -145,8 +186,8 @@ class TestIamGrants:
             },
         )
 
-    def test_sqs_send_grant_present_when_queues_given(self) -> None:
-        stack, _ = _make_stack(with_retry_queue=True, with_dlq=True)
+    def test_sqs_send_grant_present(self) -> None:
+        stack, _ = _make_stack()
         template = Template.from_stack(stack)
         template.has_resource_properties(
             "AWS::IAM::Policy",
@@ -163,80 +204,90 @@ class TestIamGrants:
             },
         )
 
-    def test_no_sqs_grant_when_queues_absent(self) -> None:
-        stack, _ = _make_stack()
-        template = Template.from_stack(stack)
-        resources = template.to_json()["Resources"]
-        policies = [r for r in resources.values() if r["Type"] == "AWS::IAM::Policy"]
-        actions = [
-            stmt["Action"]
-            for policy in policies
-            for stmt in policy["Properties"]["PolicyDocument"]["Statement"]
-        ]
-        assert "sqs:SendMessage" not in actions
 
-
-class TestEventRule:
-    def test_creates_one_rule_per_job_type(self) -> None:
+class TestTrackedRule:
+    def test_one_tracked_rule_per_job_type(self) -> None:
         stack, _ = _make_stack()
-        template = Template.from_stack(stack)
-        template.resource_count_is("AWS::Events::Rule", 1)
+        assert len(_tracked_rules(Template.from_stack(stack))) == 1
 
     def test_matches_all_batch_statuses(self) -> None:
         stack, _ = _make_stack()
-        template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Events::Rule",
-            {
-                "EventPattern": {
-                    "source": ["aws.batch"],
-                    "detail-type": ["Batch Job State Change"],
-                    "detail": Match.object_like(
-                        {
-                            "status": [
-                                "SUBMITTED",
-                                "PENDING",
-                                "RUNNABLE",
-                                "STARTING",
-                                "RUNNING",
-                                "SUCCEEDED",
-                                "FAILED",
-                            ]
-                        }
-                    ),
-                }
-            },
-        )
+        [rule] = _tracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["status"] == [
+            "SUBMITTED",
+            "PENDING",
+            "RUNNABLE",
+            "STARTING",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+        ]
 
     def test_scoped_to_job_type_queue_and_job_definition(self) -> None:
         stack, _ = _make_stack()
-        template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Events::Rule",
-            {
-                "EventPattern": {
-                    "detail": Match.object_like(
-                        {
-                            "jobQueue": [_JOB_QUEUE_ARN],
-                            "jobDefinition": [{"prefix": f"{_JOB_DEFINITION_ARN}:"}],
-                        }
-                    )
-                }
-            },
-        )
+        [rule] = _tracked_rules(Template.from_stack(stack))
+        detail = rule["EventPattern"]["detail"]
+        assert detail["jobQueue"] == [_JOB_QUEUE_ARN]
+        assert detail["jobDefinition"] == [{"prefix": f"{_JOB_DEFINITION_ARN}:"}]
 
-    def test_targets_the_function(self) -> None:
+    def test_requires_the_job_type_parameter(self) -> None:
+        stack, _ = _make_stack()
+        [rule] = _tracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["parameters"] == {
+            "bejm_job_type": [{"exists": True}]
+        }
+
+    def test_targets_the_function_with_a_dead_letter_queue(self) -> None:
+        stack, construct = _make_stack()
+        [rule] = _tracked_rules(Template.from_stack(stack))
+        [target] = rule["Targets"]
+        assert target["RetryPolicy"] == {"MaximumRetryAttempts": 3}
+        assert "DeadLetterConfig" in target
+        assert construct.rules["monthly-composite"] is not None
+
+
+class TestUntrackedRule:
+    def test_one_untracked_rule_per_job_queue(self) -> None:
+        stack, construct = _make_stack()
+        assert len(_untracked_rules(Template.from_stack(stack))) == 1
+        assert set(construct.untracked_rules) == {"monthly-composite"}
+
+    def test_excludes_jobs_carrying_the_job_type_parameter(self) -> None:
+        stack, _ = _make_stack()
+        [rule] = _untracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["parameters"] == {
+            "bejm_job_type": [{"exists": False}]
+        }
+
+    def test_scoped_to_the_queue_not_the_job_definition(self) -> None:
+        stack, _ = _make_stack()
+        [rule] = _untracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["jobQueue"] == [_JOB_QUEUE_ARN]
+
+    def test_matches_submitted_and_terminal_statuses_only(self) -> None:
+        stack, _ = _make_stack()
+        [rule] = _untracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["status"] == [
+            "SUBMITTED",
+            "SUCCEEDED",
+            "FAILED",
+        ]
+
+    def test_targets_both_the_function_and_the_untracked_queue(self) -> None:
         stack, construct = _make_stack()
         template = Template.from_stack(stack)
-        template.has_resource_properties(
-            "AWS::Events::Rule",
-            {
-                "Targets": Match.array_with(
-                    [Match.object_like({"Arn": Match.any_value()})]
-                )
-            },
+        [rule] = _untracked_rules(template)
+        assert len(rule["Targets"]) == 2
+
+        resources = template.to_json()["Resources"]
+        untracked_queue_id = next(
+            key
+            for key, r in resources.items()
+            if r["Type"] == "AWS::SQS::Queue" and "UntrackedQueue" in key
         )
-        assert construct.rules["monthly-composite"] is not None
+        target_arns = [json.dumps(target["Arn"]) for target in rule["Targets"]]
+        assert any(untracked_queue_id in arn for arn in target_arns)
+        assert construct.queues.untracked_queue is not None
 
 
 class TestMultipleJobTypes:
@@ -256,22 +307,46 @@ class TestMultipleJobTypes:
             ),
         }
 
-    def test_creates_one_rule_per_job_type(self) -> None:
-        stack, _ = _make_stack(job_type_configs=self._job_type_configs())
-        template = Template.from_stack(stack)
-        template.resource_count_is("AWS::Events::Rule", 2)
+    def _shared_queue_configs(self) -> dict[str, JobTypeConfig]:
+        return {
+            "monthly-composite": JobTypeConfig(
+                job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
+            ),
+            "granule-processing": JobTypeConfig(
+                job_queue_arn=_JOB_QUEUE_ARN,
+                job_definition_arn=self._OTHER_JOB_DEFINITION_ARN,
+            ),
+        }
 
-    def test_each_rule_scoped_to_its_own_job_type(self) -> None:
+    def test_one_tracked_rule_per_job_type(self) -> None:
         stack, construct = _make_stack(job_type_configs=self._job_type_configs())
         template = Template.from_stack(stack)
-        resources = template.to_json()["Resources"]
-        rules = [r for r in resources.values() if r["Type"] == "AWS::Events::Rule"]
+        assert len(_tracked_rules(template)) == 2
+        assert set(construct.rules) == {"monthly-composite", "granule-processing"}
+
+    def test_each_tracked_rule_scoped_to_its_own_job_type(self) -> None:
+        stack, _ = _make_stack(job_type_configs=self._job_type_configs())
+        template = Template.from_stack(stack)
         job_queues = {
-            tuple(rule["Properties"]["EventPattern"]["detail"]["jobQueue"])
-            for rule in rules
+            tuple(rule["EventPattern"]["detail"]["jobQueue"])
+            for rule in _tracked_rules(template)
         }
         assert job_queues == {(_JOB_QUEUE_ARN,), (self._OTHER_JOB_QUEUE_ARN,)}
-        assert set(construct.rules) == {"monthly-composite", "granule-processing"}
+
+    def test_one_untracked_rule_per_distinct_queue(self) -> None:
+        stack, construct = _make_stack(job_type_configs=self._job_type_configs())
+        assert len(_untracked_rules(Template.from_stack(stack))) == 2
+        assert set(construct.untracked_rules) == {
+            "monthly-composite",
+            "granule-processing",
+        }
+
+    def test_job_types_sharing_a_queue_share_one_untracked_rule(self) -> None:
+        stack, construct = _make_stack(job_type_configs=self._shared_queue_configs())
+        template = Template.from_stack(stack)
+        assert len(_tracked_rules(template)) == 2
+        assert len(_untracked_rules(template)) == 1
+        assert set(construct.untracked_rules) == {"monthly-composite"}
 
     def test_shares_one_lambda_function(self) -> None:
         stack, _ = _make_stack(job_type_configs=self._job_type_configs())

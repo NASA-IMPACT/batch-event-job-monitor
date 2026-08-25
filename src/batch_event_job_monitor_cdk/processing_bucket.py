@@ -83,8 +83,7 @@ class ProcessingBucket(Construct):
 
         if auto_delete_objects and removal_policy is not RemovalPolicy.DESTROY:
             raise ValueError(
-                "auto_delete_objects=True requires "
-                "removal_policy=RemovalPolicy.DESTROY"
+                "auto_delete_objects=True requires removal_policy=RemovalPolicy.DESTROY"
             )
 
         self.bucket_name = bucket_name

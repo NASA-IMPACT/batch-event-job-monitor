@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from aws_cdk import App, Stack
+import pytest
+from aws_cdk import App, RemovalPolicy, Stack
 from aws_cdk.assertions import Match, Template
 
 from batch_event_job_monitor_cdk.processing_bucket import ProcessingBucket
@@ -192,3 +193,65 @@ class TestInventoryLocation:
             construct.inventory_location("records")
             == "s3://other-bucket/reports/other-bucket/records/hive/"
         )
+
+
+class TestRemovalPolicy:
+    """Tests for the removal_policy / auto_delete_objects parameters."""
+
+    def test_defaults_to_retain_on_update_or_delete(self) -> None:
+        stack, _ = _make_bucket()
+        template = Template.from_stack(stack)
+        [bucket] = [
+            r
+            for r in template.to_json()["Resources"].values()
+            if r["Type"] == "AWS::S3::Bucket"
+        ]
+        assert bucket["DeletionPolicy"] == "RetainExceptOnCreate"
+        assert bucket["UpdateReplacePolicy"] == "Retain"
+
+    def test_destroy_is_expressible(self) -> None:
+        app = App()
+        stack = Stack(app, "TestStack")
+        ProcessingBucket(
+            stack,
+            "TestProcessingBucket",
+            bucket_name="dev-bucket",
+            inventory_prefix="inventory/",
+            inventories=[("state", "state/")],
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        template = Template.from_stack(stack)
+        [bucket] = [
+            r
+            for r in template.to_json()["Resources"].values()
+            if r["Type"] == "AWS::S3::Bucket"
+        ]
+        assert bucket["DeletionPolicy"] == "Delete"
+
+    def test_auto_delete_objects_adds_the_custom_resource(self) -> None:
+        app = App()
+        stack = Stack(app, "TestStack")
+        ProcessingBucket(
+            stack,
+            "TestProcessingBucket",
+            bucket_name="dev-bucket",
+            inventory_prefix="inventory/",
+            inventories=[("state", "state/")],
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+        template = Template.from_stack(stack)
+        template.resource_count_is("Custom::S3AutoDeleteObjects", 1)
+
+    def test_auto_delete_objects_requires_destroy(self) -> None:
+        app = App()
+        stack = Stack(app, "TestStack")
+        with pytest.raises(ValueError, match=r"RemovalPolicy\.DESTROY"):
+            ProcessingBucket(
+                stack,
+                "TestProcessingBucket",
+                bucket_name="dev-bucket",
+                inventory_prefix="inventory/",
+                inventories=[("state", "state/")],
+                auto_delete_objects=True,
+            )

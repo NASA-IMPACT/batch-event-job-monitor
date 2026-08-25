@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from batch_event_job_monitor.models import (
+    PARAM_PREFIX,
     ExitCodeOutcomes,
     JobGroup,
     ProcessingState,
@@ -15,7 +16,6 @@ from batch_event_job_monitor.models import (
 if TYPE_CHECKING:
     from mypy_boto3_batch.type_defs import JobDetailTypeDef
 
-_PARAM_PREFIX = "bejm_"
 _REQUIRED_PARAM_KEYS = (
     "job_type",
     "input_entity_ids",
@@ -138,9 +138,30 @@ class JobDetails:
         raise ValueError(f"Unrecognized job status: {self.status!r}")
 
     @property
+    def job_queue(self) -> str | None:
+        """ARN of the Batch job queue this job was submitted to."""
+        return self._typed_raw.get("jobQueue")
+
+    @property
+    def job_definition(self) -> str | None:
+        """ARN of the Batch job definition this job runs, revision included."""
+        return self._typed_raw.get("jobDefinition")
+
+    @property
     def parameters(self) -> dict[str, str]:
         """AWS Batch SubmitJobRequest.parameters echoed back on this job."""
         return self._typed_raw.get("parameters") or {}
+
+    @property
+    def is_tracked(self) -> bool:
+        """True if this job carries the monitoring parameter contract.
+
+        Tests only for the one parameter the EventBridge rules split on, so
+        the Lambda's view of tracked-vs-untracked matches the rule that
+        delivered the event. A job carrying that parameter but missing the
+        rest is tracked-but-malformed, and decode_job_group raises for it.
+        """
+        return f"{PARAM_PREFIX}job_type" in self.parameters
 
     def decode_job_group(self) -> JobGroup:
         """Decode the JobGroup from this job's Batch parameters.
@@ -155,13 +176,13 @@ class JobDetails:
         """
         parameters = self.parameters
         stripped = {
-            key[len(_PARAM_PREFIX) :]: value
+            key[len(PARAM_PREFIX) :]: value
             for key, value in parameters.items()
-            if key.startswith(_PARAM_PREFIX)
+            if key.startswith(PARAM_PREFIX)
         }
 
         missing = [
-            f"{_PARAM_PREFIX}{key}"
+            f"{PARAM_PREFIX}{key}"
             for key in _REQUIRED_PARAM_KEYS
             if key not in stripped
         ]
@@ -177,7 +198,7 @@ class JobDetails:
             attempt = int(stripped["attempt"])
         except ValueError as exc:
             raise ValueError(
-                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}attempt is not an "
+                f"Batch job {self.job_id!r}: {PARAM_PREFIX}attempt is not an "
                 f"integer: {stripped['attempt']!r}"
             ) from exc
 
@@ -185,12 +206,12 @@ class JobDetails:
             partition_fields = json.loads(stripped["partition_fields"])
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}partition_fields is "
+                f"Batch job {self.job_id!r}: {PARAM_PREFIX}partition_fields is "
                 "not valid JSON"
             ) from exc
         if not isinstance(partition_fields, dict):
             raise ValueError(
-                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}partition_fields must "
+                f"Batch job {self.job_id!r}: {PARAM_PREFIX}partition_fields must "
                 f"decode to an object, got {type(partition_fields).__name__}"
             )
 
@@ -198,7 +219,7 @@ class JobDetails:
             input_entity_ids = json.loads(stripped["input_entity_ids"])
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}input_entity_ids is "
+                f"Batch job {self.job_id!r}: {PARAM_PREFIX}input_entity_ids is "
                 "not valid JSON"
             ) from exc
         if not (
@@ -207,7 +228,7 @@ class JobDetails:
             and all(isinstance(entity_id, str) for entity_id in input_entity_ids)
         ):
             raise ValueError(
-                f"Batch job {self.job_id!r}: {_PARAM_PREFIX}input_entity_ids must "
+                f"Batch job {self.job_id!r}: {PARAM_PREFIX}input_entity_ids must "
                 "decode to a non-empty array of strings"
             )
 

@@ -142,7 +142,7 @@ class RetryPolicy:
         return cls(**kwargs)
 
 
-_PARAM_PREFIX = "bejm_"
+PARAM_PREFIX = "bejm_"
 _MAX_BATCH_JOB_NAME_LENGTH = 128
 _JOB_NAME_HASH_LENGTH = 8
 
@@ -247,13 +247,13 @@ class JobGroup:
         every state change of that job's life.
         """
         return {
-            f"{_PARAM_PREFIX}job_type": self.job_type,
-            f"{_PARAM_PREFIX}input_entity_ids": json.dumps(self.input_entity_ids),
-            f"{_PARAM_PREFIX}output_entity_id": self.output_entity_id,
-            f"{_PARAM_PREFIX}partition_fields": json.dumps(
+            f"{PARAM_PREFIX}job_type": self.job_type,
+            f"{PARAM_PREFIX}input_entity_ids": json.dumps(self.input_entity_ids),
+            f"{PARAM_PREFIX}output_entity_id": self.output_entity_id,
+            f"{PARAM_PREFIX}partition_fields": json.dumps(
                 self.partition_fields, sort_keys=True
             ),
-            f"{_PARAM_PREFIX}attempt": str(self.attempt),
+            f"{PARAM_PREFIX}attempt": str(self.attempt),
         }
 
 

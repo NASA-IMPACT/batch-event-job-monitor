@@ -11,6 +11,7 @@ from batch_event_job_monitor_cdk.job_type_config import (
     job_definition_family_arn,
     job_type_config,
 )
+from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
 from batch_event_job_monitor_cdk.partition_key_spec import PartitionKeySpec
 from batch_event_job_monitor_cdk.processing_bucket import ProcessingBucket
 
@@ -20,6 +21,7 @@ __all__ = [
     "AthenaStateTable",
     "JobMonitorFunction",
     "JobResubmitFunction",
+    "MonitoringQueues",
     "PartitionKeySpec",
     "ProcessingBucket",
     "job_definition_family_arn",

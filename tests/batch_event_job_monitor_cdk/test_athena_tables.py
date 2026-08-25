@@ -320,38 +320,6 @@ class TestAthenaOutputsTable:
         assert "/([^/]+)$" in sql
 
 
-class TestPartitionKeySpecValidation:
-    """Tests for PartitionKeySpec's __post_init__ validation."""
-
-    def test_enum_projection_requires_enum_values(self) -> None:
-        with pytest.raises(ValueError, match="enum_values"):
-            PartitionKeySpec("job_type", "string", "enum")
-
-    def test_date_projection_requires_date_range(self) -> None:
-        with pytest.raises(ValueError, match="date_range"):
-            PartitionKeySpec("year_month", "string", "date")
-
-    def test_date_projection_requires_date_format(self) -> None:
-        with pytest.raises(ValueError, match="date_format"):
-            PartitionKeySpec(
-                "year",
-                "string",
-                "date",
-                date_range=("2020", "NOW"),
-                date_interval_unit="YEARS",
-            )
-
-    def test_date_projection_requires_date_interval_unit(self) -> None:
-        with pytest.raises(ValueError, match="date_interval_unit"):
-            PartitionKeySpec(
-                "year",
-                "string",
-                "date",
-                date_range=("2020", "NOW"),
-                date_format="yyyy",
-            )
-
-
 def _logical_id(template: Template, table_name: str) -> str:
     resources = template.to_json()["Resources"]
     [logical_id] = [
