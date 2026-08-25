@@ -10,13 +10,13 @@ import pytest
 from aws_cdk import App, Stack, aws_glue as glue
 from aws_cdk.assertions import Match, Template
 
-from batch_event_job_monitor_cdk.athena_outputs_database import (
-    AthenaOutputsDatabase,
+from batch_event_job_monitor_cdk.athena_outputs_table import (
+    AthenaOutputsTable,
 )
-from batch_event_job_monitor_cdk.athena_records_database import (
-    AthenaRecordsDatabase,
+from batch_event_job_monitor_cdk.athena_records_table import (
+    AthenaRecordsTable,
 )
-from batch_event_job_monitor_cdk.athena_state_database import AthenaStateDatabase
+from batch_event_job_monitor_cdk.athena_state_table import AthenaStateTable
 from batch_event_job_monitor_cdk.partition_key_spec import PartitionKeySpec
 
 _PARTITION_KEYS = [
@@ -44,7 +44,7 @@ def _make_stack() -> Stack:
         database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
     )
 
-    AthenaRecordsDatabase(
+    AthenaRecordsTable(
         stack,
         "Records",
         database=database,
@@ -56,7 +56,7 @@ def _make_stack() -> Stack:
 
     dt_start = dt.datetime(2025, 1, 1, 12, 0)
 
-    AthenaStateDatabase(
+    AthenaStateTable(
         stack,
         "State",
         database=database,
@@ -70,7 +70,7 @@ def _make_stack() -> Stack:
         partition_keys=_PARTITION_KEYS,
     )
 
-    AthenaOutputsDatabase(
+    AthenaOutputsTable(
         stack,
         "Outputs",
         database=database,
@@ -110,7 +110,7 @@ class TestSynthesis:
         assert "Resources" in template
 
 
-class TestAthenaRecordsDatabase:
+class TestAthenaRecordsTable:
     """Tests for the records table."""
 
     def test_records_table_is_external_table(self) -> None:
@@ -204,7 +204,7 @@ class TestAthenaRecordsDatabase:
         )
 
 
-class TestAthenaStateDatabase:
+class TestAthenaStateTable:
     """Tests for the state inventory table and current-state view."""
 
     def test_inventory_table_is_external_table(self) -> None:
@@ -262,7 +262,7 @@ class TestAthenaStateDatabase:
         assert "/([0-9]{3})$" in sql
 
 
-class TestAthenaOutputsDatabase:
+class TestAthenaOutputsTable:
     """Tests for the outputs inventory table and current-outputs view."""
 
     def test_inventory_table_is_external_table(self) -> None:

@@ -2,7 +2,7 @@
 
 Centralizes the Hive format strings, the S3 Inventory column schema, and the two
 CfnTable factories (inventory table + Presto view) reused by the state, outputs,
-and records databases.
+and records tables.
 """
 
 from __future__ import annotations

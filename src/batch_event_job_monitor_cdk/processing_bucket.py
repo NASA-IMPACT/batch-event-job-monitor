@@ -41,6 +41,17 @@ class ProcessingBucket(Construct):
         (inventory_id, objects_prefix) pairs. One daily Parquet S3 Inventory
         configuration is created per pair, covering objects under
         objects_prefix.
+    removal_policy : RemovalPolicy, optional
+        Removal policy for the managed bucket. Defaults to
+        RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE, which keeps processing
+        history when a production stack is replaced or destroyed. Pass
+        RemovalPolicy.DESTROY (with auto_delete_objects=True) for an
+        ephemeral dev stack that should tear down completely.
+    auto_delete_objects : bool, optional
+        Empty the bucket on stack deletion via CDK's auto-delete custom
+        resource. Defaults to False. Requires removal_policy to be
+        RemovalPolicy.DESTROY -- CloudFormation cannot delete a non-empty
+        bucket, so DESTROY without this leaves the bucket behind.
     **kwargs : Any
         Additional keyword arguments forwarded to the Construct base class.
 
@@ -48,6 +59,12 @@ class ProcessingBucket(Construct):
     ----------
     bucket : s3.Bucket
         The managed S3 bucket.
+
+    Raises
+    ------
+    ValueError
+        If auto_delete_objects is True and removal_policy is not
+        RemovalPolicy.DESTROY.
     """
 
     def __init__(
@@ -58,9 +75,17 @@ class ProcessingBucket(Construct):
         bucket_name: str,
         inventory_prefix: str,
         inventories: list[tuple[str, str]],
+        removal_policy: RemovalPolicy = RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+        auto_delete_objects: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        if auto_delete_objects and removal_policy is not RemovalPolicy.DESTROY:
+            raise ValueError(
+                "auto_delete_objects=True requires "
+                "removal_policy=RemovalPolicy.DESTROY"
+            )
 
         self.bucket_name = bucket_name
         self.inventory_prefix = inventory_prefix
@@ -69,7 +94,8 @@ class ProcessingBucket(Construct):
             self,
             "Bucket",
             bucket_name=bucket_name,
-            removal_policy=RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
+            removal_policy=removal_policy,
+            auto_delete_objects=auto_delete_objects,
             enforce_ssl=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             lifecycle_rules=[

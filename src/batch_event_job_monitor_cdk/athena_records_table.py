@@ -1,7 +1,7 @@
-"""CDK construct for the Athena records/ database.
+"""CDK construct for the Athena records/ table.
 
-Creates a Glue database + partition-projected table over the Hive-style
-``records/`` prefix. Partition projection means new partitions are
+Creates a partition-projected Glue table, in a Glue database the caller
+owns, over the Hive-style ``records/`` prefix. Partition projection means new partitions are
 queryable immediately as records land -- no ``MSCK REPAIR TABLE`` or Glue
 crawler needed.
 
@@ -45,7 +45,7 @@ _COLUMNS = [
 ]
 
 
-class AthenaRecordsDatabase(Construct):
+class AthenaRecordsTable(Construct):
     """Athena database for querying canonical processing records.
 
     Parameters

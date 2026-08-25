@@ -1,19 +1,18 @@
-"""CDK construct for the Athena output-index database.
+"""CDK construct for the Athena state-inventory table.
 
-Creates a Glue database + S3-inventory table over the ``outputs/`` prefix of
-the processing bucket, plus a view that parses each key into structured
-columns.
+Creates an S3-inventory table over the ``state/`` prefix of the processing
+bucket, in a Glue database the caller owns, plus a view that parses each
+key into structured columns.
 
 Key schema:
-  ``outputs/state={STATE}/job_type={job_type}/{partition_fields...}/{output_entity_id}``
+  ``state/state={STATE}/job_type={job_type}/{partition_fields...}/input_entity_id={input_entity_id}/{attempt:03d}``
 
-Output-index entries are written by the job monitor at terminal state for
-all outcomes, keyed by ``output_entity_id``. This makes the inventory the
-source for downstream reconciliation queries:
+The inventory snapshot (daily Parquet) is cheap to query and supports
+reconciliation queries such as:
 
-  - Compare SUCCESS output entity IDs against a downstream catalog
-  - Coverage by partition: count produced outputs by partition key
-  - Non-success rates over time
+  - Count entities by state / partition
+  - Find entities stuck in SUBMITTED or AWAITING for a given partition
+  - Diff today vs yesterday to measure throughput
 """
 
 from __future__ import annotations
@@ -32,8 +31,8 @@ from .athena_common import (
 from .partition_key_spec import PartitionKeySpec, regexp_extract_columns
 
 
-class AthenaOutputsDatabase(Construct):
-    """Athena database for reconciliation queries over outputs/ index objects.
+class AthenaStateTable(Construct):
+    """Athena database for reconciliation queries over state/ pointer objects.
 
     Parameters
     ----------
@@ -46,15 +45,14 @@ class AthenaOutputsDatabase(Construct):
     database_name : str
         Literal name of ``database`` (not a CDK token).
     inventory_location_s3path : str
-        s3:// URI of the outputs prefix's S3 Inventory Hive symlink
-        manifests.
+        s3:// URI of the state prefix's S3 Inventory Hive symlink manifests.
     table_datetime_start : dt.datetime
         Anchor datetime for the inventory table's ``dt`` partition
         projection. Its time-of-day must match the S3 delivery hour.
     table_name : str
         Name of the inventory table.
     view_name : str
-        Name of the current-outputs view.
+        Name of the current-state view.
     partition_keys : list[PartitionKeySpec]
         Ordered partition keys, including the leading ``job_type`` entry.
     **kwargs : Any
@@ -65,9 +63,9 @@ class AthenaOutputsDatabase(Construct):
     database : glue.CfnDatabase
         The Glue database passed in.
     inventory_table : glue.CfnTable
-        The S3-inventory table over the outputs/ prefix.
-    outputs_view : glue.CfnTable
-        The current-outputs Presto view.
+        The S3-inventory table over the state/ prefix.
+    state_view : glue.CfnTable
+        The current-state Presto view.
     """
 
     def __init__(
@@ -97,9 +95,9 @@ class AthenaOutputsDatabase(Construct):
             datetime_start=table_datetime_start,
         )
 
-        self.outputs_view = create_presto_view(
+        self.state_view = create_presto_view(
             self,
-            "OutputsView",
+            "StateView",
             database=database,
             database_name=database_name,
             view_name=view_name,
@@ -117,40 +115,46 @@ class AthenaOutputsDatabase(Construct):
             glue.CfnTable.ColumnProperty(
                 name="state",
                 type="string",
-                comment="Terminal state the output was indexed under.",
+                comment=(
+                    "Processing state (SUBMITTED, AWAITING, SUCCESS, "
+                    "FAILURE_RETRYABLE, FAILURE_NONRETRYABLE)."
+                ),
             ),
             *(
                 glue.CfnTable.ColumnProperty(name=key.name, type="string")
                 for key in partition_keys
             ),
             glue.CfnTable.ColumnProperty(
-                name="output_entity_id",
+                name="input_entity_id",
                 type="string",
-                comment="Output entity identifier.",
+                comment="Processed entity identifier.",
+            ),
+            glue.CfnTable.ColumnProperty(
+                name="attempt",
+                type="int",
+                comment="Attempt number (1-indexed).",
             ),
             glue.CfnTable.ColumnProperty(
                 name="last_modified_date",
                 type="timestamp",
-                comment="When the output-index entry was written.",
+                comment="When the state pointer was last written.",
             ),
             glue.CfnTable.ColumnProperty(
                 name="key",
                 type="string",
-                comment="Full S3 key of the output-index object.",
+                comment="Full S3 key of the state pointer object.",
             ),
         ]
 
     @staticmethod
     def _view_sql(table_name: str, partition_keys: list[PartitionKeySpec]) -> str:
         partition_columns = regexp_extract_columns(partition_keys)
-        # output_entity_id is the bare trailing path segment (no "key="
-        # prefix), so it is captured directly rather than via a named
-        # regexp_extract group keyed off the last partition key's name.
         return f"""
         SELECT
             regexp_extract(key, '/state=([^/]+)/', 1) AS state,
             {partition_columns},
-            regexp_extract(key, '/([^/]+)$', 1) AS output_entity_id,
+            regexp_extract(key, '/input_entity_id=([^/]+)/', 1) AS input_entity_id,
+            CAST(regexp_extract(key, '/([0-9]{{3}})$', 1) AS INT) AS attempt,
             last_modified_date,
             key
         FROM {table_name}
