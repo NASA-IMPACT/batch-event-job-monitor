@@ -117,7 +117,7 @@ def create_inventory_table(
         ),
     )
     table.apply_removal_policy(RemovalPolicy.DESTROY)
-    table.add_dependency(database)
+    table.add_resource_dependency(database)
     return table
 
 
@@ -172,5 +172,5 @@ def create_presto_view(
     )
     view.apply_removal_policy(RemovalPolicy.DESTROY)
     if depends_on is not None:
-        view.add_dependency(depends_on)
+        view.add_resource_dependency(depends_on)
     return view

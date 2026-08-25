@@ -350,3 +350,40 @@ class TestPartitionKeySpecValidation:
                 date_range=("2020", "NOW"),
                 date_format="yyyy",
             )
+
+
+def _logical_id(template: Template, table_name: str) -> str:
+    resources = template.to_json()["Resources"]
+    [logical_id] = [
+        key
+        for key, r in resources.items()
+        if r["Type"] == "AWS::Glue::Table"
+        and r["Properties"]["TableInput"]["Name"] == table_name
+    ]
+    return str(logical_id)
+
+
+def _depends_on(template: Template, table_name: str) -> list[str]:
+    resources = template.to_json()["Resources"]
+    return list(resources[_logical_id(template, table_name)].get("DependsOn", []))
+
+
+class TestResourceDependencies:
+    """Tables must be created after the database, views after their table."""
+
+    @pytest.mark.parametrize(
+        "table_name", ["records", "state_inventory", "outputs_inventory"]
+    )
+    def test_table_depends_on_database(self, table_name: str) -> None:
+        template = Template.from_stack(_make_stack())
+        assert _depends_on(template, table_name) == ["TestDatabase"]
+
+    @pytest.mark.parametrize(
+        ("view_name", "table_name"),
+        [("state", "state_inventory"), ("outputs", "outputs_inventory")],
+    )
+    def test_view_depends_on_inventory_table(
+        self, view_name: str, table_name: str
+    ) -> None:
+        template = Template.from_stack(_make_stack())
+        assert _depends_on(template, view_name) == [_logical_id(template, table_name)]

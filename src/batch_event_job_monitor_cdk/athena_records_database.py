@@ -143,5 +143,5 @@ class AthenaRecordsDatabase(Construct):
             ),
         )
         table.apply_removal_policy(RemovalPolicy.DESTROY)
-        table.add_dependency(self.database)
+        table.add_resource_dependency(self.database)
         return table
