@@ -1,7 +1,7 @@
-"""Partition key specification shared by the Athena database constructs.
+"""Partition key specification shared by the Athena table constructs.
 
 A PartitionKeySpec describes one column of the ordered partition-key list
-shared by the records/state/outputs Athena database constructs. The full
+shared by the records/state/outputs Athena table constructs. The full
 ordered list -- including the leading job_type entry, since job_type is just
 another partition key at this layer -- drives the Glue partition-projection
 parameters, the storage.location.template path, and the regexp_extract
@@ -29,8 +29,13 @@ class PartitionKeySpec:
     glue_type : str
         Glue/Athena column type of the partition key ("string", "date",
         etc.).
-    projection : {"enum", "date"}
-        Partition projection type.
+    projection : {"enum", "date", "injected"}
+        Partition projection type. "injected" takes its values from the
+        query's WHERE clause instead of an enumerated or generated set,
+        which is how high-cardinality keys (MGRS tile ids, granule ids)
+        stay partitioned without enumerating every value at deploy time.
+        Athena requires an equality predicate on every injected key of a
+        queried table, and rejects the query when one is missing.
     enum_values : tuple[str, ...] or None, optional
         Allowed partition values. Required when projection is "enum".
     date_range : tuple[str, str] or None, optional
@@ -46,14 +51,15 @@ class PartitionKeySpec:
     Raises
     ------
     ValueError
-        If enum_values is missing for an "enum" projection, or if
+        If enum_values is missing for an "enum" projection, if
         date_range, date_format, or date_interval_unit is missing for a
-        "date" projection.
+        "date" projection, or if an "injected" projection is given a
+        non-string glue_type.
     """
 
     name: str
     glue_type: str
-    projection: Literal["enum", "date"]
+    projection: Literal["enum", "date", "injected"]
     enum_values: tuple[str, ...] | None = None
     date_range: tuple[str, str] | None = None
     date_format: str | None = None
@@ -81,6 +87,12 @@ class PartitionKeySpec:
                     f"partition key '{self.name}': date_interval_unit is "
                     "required when projection is 'date'"
                 )
+        if self.projection == "injected" and self.glue_type != "string":
+            # Athena only supports injected projection on string columns.
+            raise ValueError(
+                f"partition key '{self.name}': projection 'injected' requires "
+                f"glue_type 'string', got {self.glue_type!r}"
+            )
 
 
 def glue_partition_keys(
@@ -122,7 +134,9 @@ def partition_projection_parameters(
     """
     params: dict[str, str] = {}
     for key in partition_keys:
-        if key.projection == "enum":
+        if key.projection == "injected":
+            params[f"projection.{key.name}.type"] = "injected"
+        elif key.projection == "enum":
             assert key.enum_values is not None
             params[f"projection.{key.name}.type"] = "enum"
             params[f"projection.{key.name}.values"] = ",".join(key.enum_values)
