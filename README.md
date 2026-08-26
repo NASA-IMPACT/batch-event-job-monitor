@@ -5,10 +5,14 @@ Reusable AWS Batch job-monitoring components:
 - an S3-backed job log store
 - a Lambda-based job monitor core, tracking a job's full lifecycle (submission through terminal outcome)
 - CDK constructs for:
-  - the supporting processing bucket
-  - Athena/Glue databases used to query job logs
+  - `ProcessingBucket`: the supporting processing bucket and its S3 Inventories
+  - `MonitoringQueues`: the retry, dead-letter, and untracked-job queues
   - `JobMonitorFunction`: a batteries-included job-monitor Lambda
   - `JobResubmitFunction`: infrastructure for a retry-queue-driven resubmit Lambda
+  - `AthenaRecordsTable` / `AthenaStateTable` / `AthenaOutputsTable`: Glue tables and views for querying job logs
+
+See [`docs/constructs.md`](docs/constructs.md) for what each construct creates, what it needs from you, and how they
+wire together.
 
 ## The `bejm_*` parameters contract
 
@@ -69,7 +73,9 @@ safely) to get the correct next `attempt` without hand-computing it.
 
 `JobMonitorFunction` bundles its own Lambda handler -- no consumer-authored Python is required for the common case. It
 wires one EventBridge rule per job_type, each scoped to that job_type's own Batch job queue/job definition, to the
-bundled handler, which decodes the `bejm_*` identity parameters and calls `monitor_job` internally.
+bundled handler, which decodes the `bejm_*` identity parameters and calls `monitor_job` internally. It also creates its
+own `MonitoringQueues` unless you hand it one, so the retry queue, the dead-letter queues, and the untracked-job queue
+need no wiring.
 
 Every job_type this construct monitors needs an entry in `job_type_configs` -- a job_type not listed there is never
 matched by any rule the construct creates, so its events never reach the Lambda. `JobTypeConfig` bundles that job_type's
@@ -82,7 +88,7 @@ from aws_cdk import aws_batch as batch
 from batch_event_job_monitor.models import ExitCodeOutcomesBuilder, RetryPolicy
 from batch_event_job_monitor_cdk import JobMonitorFunction, job_type_config
 
-JobMonitorFunction(
+monitor = JobMonitorFunction(
     self,
     "JobMonitor",
     processing_bucket=processing_bucket.bucket,
@@ -99,8 +105,6 @@ JobMonitorFunction(
             ),
         ),
     },
-    retry_queue=retry_queue,
-    dlq=dlq,
 )
 ```
 
@@ -115,6 +119,23 @@ There's no separate closed `ProcessingState` taxonomy that custom outcomes fall 
 job_type's declared `ExitCodeOutcomes` form the bounded set of states `monitor_job` scans, baseline states plus
 whatever's declared. `retryable` (default `False`) selects retryable vs non-retryable routing; `dlq` is required (no
 default) -- every outcome must state its routing intent explicitly.
+
+`monitor.queues` is the `MonitoringQueues` the construct created (or the one you passed): `retry_queue`, `retry_dlq`,
+`failure_dlq`, `untracked_queue`, and `event_dlq`. Every failure path terminates in one of them rather than dropping an
+event. See [`docs/constructs.md`](docs/constructs.md#monitoringqueues) for the queue settings and the customer-managed
+KMS key caveat.
+
+## When the `bejm_*` contract is not met
+
+A job submitted to a monitored queue without those parameters runs perfectly and is invisible to monitoring -- no
+canonical record, no state pointer, no output-index entry, and no error. That is the failure mode a manual or backfill
+submission is most likely to hit.
+
+`JobMonitorFunction` creates a catch-all EventBridge rule per monitored Batch job queue, matching
+`SUBMITTED`/`SUCCEEDED`/`FAILED` events whose `bejm_job_type` parameter is absent. Those jobs go to two independent
+targets: the monitor Lambda, which emits an `UntrackedJobs` CloudWatch metric and a structured log line, and
+`queues.untracked_queue`, which keeps the raw event so the submission can be replayed once the caller is fixed. Alarm on
+the metric -- see [`docs/constructs.md`](docs/constructs.md#untracked-jobs).
 
 ## Library-only path
 
@@ -135,9 +156,12 @@ JobResubmitFunction(
     self,
     "JobResubmit",
     job_type_configs=job_type_configs,  # the same mapping passed to JobMonitorFunction
-    retry_queue=retry_queue,
+    retry_queue=monitor.queues.retry_queue,
 )
 ```
+
+`retry_queue` is the queue `JobMonitorFunction` publishes retryable failures to -- take it from the monitor's own
+`MonitoringQueues`, or create a `MonitoringQueues` yourself and pass the same one to both constructs.
 
 For per-attempt `containerOverrides`, a computed command, or `batch:DescribeJobs`-driven introspection of the original
 job, supply your own `entry`/`index` instead -- see [`docs/resubmitting-jobs.md`](docs/resubmitting-jobs.md) for the
