@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from aws_cdk import App, RemovalPolicy, Stack
 from aws_cdk.assertions import Match, Template
@@ -254,4 +256,123 @@ class TestRemovalPolicy:
                 inventory_prefix="inventory/",
                 inventories=[("state", "state/")],
                 auto_delete_objects=True,
+            )
+
+
+class TestBucketNamespace:
+    """Tests for the account regional namespace naming path."""
+
+    def _account_regional_stack(self) -> Stack:
+        app = App()
+        stack = Stack(app, "TestStack")
+        ProcessingBucket(
+            stack,
+            "TestProcessingBucket",
+            bucket_name_prefix="hls-processing",
+            inventory_prefix="inventory/",
+            inventories=[("state", "state/")],
+        )
+        return stack
+
+    def test_global_namespace_uses_bucket_name(self) -> None:
+        stack, _ = _make_bucket()
+        template = Template.from_stack(stack)
+        template.has_resource_properties(
+            "AWS::S3::Bucket",
+            Match.object_like({"BucketName": "test-processing-bucket"}),
+        )
+        [bucket] = [
+            r
+            for r in template.to_json()["Resources"].values()
+            if r["Type"] == "AWS::S3::Bucket"
+        ]
+        assert "BucketNamespace" not in bucket["Properties"]
+
+    def test_account_regional_uses_prefix_and_namespace(self) -> None:
+        template = Template.from_stack(self._account_regional_stack())
+        template.has_resource_properties(
+            "AWS::S3::Bucket",
+            Match.object_like(
+                {
+                    "BucketNamePrefix": "hls-processing",
+                    "BucketNamespace": "account-regional",
+                }
+            ),
+        )
+        [bucket] = [
+            r
+            for r in template.to_json()["Resources"].values()
+            if r["Type"] == "AWS::S3::Bucket"
+        ]
+        assert "BucketName" not in bucket["Properties"]
+
+    def test_bucket_name_carries_the_namespace_suffix(self) -> None:
+        app = App()
+        stack = Stack(app, "TestStack")
+        construct = ProcessingBucket(
+            stack,
+            "TestProcessingBucket",
+            bucket_name_prefix="hls-processing",
+            inventory_prefix="inventory/",
+            inventories=[("state", "state/")],
+        )
+        resolved = Stack.of(construct).resolve(construct.bucket_name)
+        assert resolved == {
+            "Fn::Join": [
+                "",
+                [
+                    "hls-processing-",
+                    {"Ref": "AWS::AccountId"},
+                    "-",
+                    {"Ref": "AWS::Region"},
+                    "-an",
+                ],
+            ]
+        }
+
+    def test_inventory_destination_arn_uses_the_full_name(self) -> None:
+        template = Template.from_stack(self._account_regional_stack())
+        [bucket] = [
+            r
+            for r in template.to_json()["Resources"].values()
+            if r["Type"] == "AWS::S3::Bucket"
+        ]
+        arn = bucket["Properties"]["InventoryConfigurations"][0]["Destination"][
+            "BucketArn"
+        ]
+        assert arn == {
+            "Fn::Join": [
+                "",
+                [
+                    "arn:aws:s3:::hls-processing-",
+                    {"Ref": "AWS::AccountId"},
+                    "-",
+                    {"Ref": "AWS::Region"},
+                    "-an",
+                ],
+            ]
+        }
+
+    def test_synthesizes_without_unresolved_tokens(self) -> None:
+        blob = json.dumps(Template.from_stack(self._account_regional_stack()).to_json())
+        assert "${Token[" not in blob
+
+    def test_requires_exactly_one_naming_parameter(self) -> None:
+        app = App()
+        stack = Stack(app, "TestStack")
+        with pytest.raises(ValueError, match="exactly one of bucket_name"):
+            ProcessingBucket(
+                stack,
+                "Neither",
+                inventory_prefix="inventory/",
+                inventories=[("state", "state/")],
+            )
+        with pytest.raises(ValueError, match="exactly one of bucket_name"):
+            ProcessingBucket(
+                stack,
+                "Both",
+                bucket_name="test-bucket",
+                bucket_name_prefix="test",
+                inventory_prefix="inventory/",
+                inventories=[("state", "state/")],
             )

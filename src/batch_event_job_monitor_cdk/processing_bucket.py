@@ -11,12 +11,18 @@ from __future__ import annotations
 from typing import Any
 
 from aws_cdk import (
+    Aws,
     Duration,
     RemovalPolicy,
     aws_iam as iam,
     aws_s3 as s3,
 )
 from constructs import Construct
+
+# Suffix CloudFormation appends to bucket_name_prefix for a bucket in the
+# account regional namespace. See "Namespaces for general purpose buckets"
+# in the S3 user guide.
+_ACCOUNT_REGIONAL_SUFFIX = "an"
 
 
 class ProcessingBucket(Construct):
@@ -28,10 +34,19 @@ class ProcessingBucket(Construct):
         Parent construct.
     construct_id : str
         Construct id, unique within scope.
-    bucket_name : str
-        Name of the managed S3 bucket. Passed as a literal string (not a CDK
-        token) because it is embedded directly in an ARN used to import the
-        bucket as its own inventory destination.
+    bucket_name : str or None, optional
+        Name of the managed S3 bucket in the shared global namespace.
+        Mutually exclusive with bucket_name_prefix; exactly one of the two
+        is required.
+    bucket_name_prefix : str or None, optional
+        Prefix of a bucket created in your account regional namespace,
+        whose full name CloudFormation forms as
+        ``{prefix}-{accountId}-{region}-an``. That namespace is reserved to
+        your account, so the name can never be claimed or re-created by
+        another account, and the same prefix templates cleanly across
+        accounts and regions. The suffix counts against S3's 63-character
+        limit, leaving 37 characters for the prefix; aws-cdk-lib validates
+        the prefix's length and character set.
     inventory_prefix : str
         Common key prefix under which every inventory's reports are delivered.
         S3 further namespaces each inventory's reports by inventory_id below
@@ -59,11 +74,16 @@ class ProcessingBucket(Construct):
     ----------
     bucket : s3.Bucket
         The managed S3 bucket.
+    bucket_name : str
+        The bucket's full name. For an account regional bucket this is the
+        prefix plus the namespace suffix, so it carries unresolved account
+        and region tokens rather than being a plain literal.
 
     Raises
     ------
     ValueError
-        If auto_delete_objects is True and removal_policy is not
+        If neither or both of bucket_name and bucket_name_prefix are given,
+        or if auto_delete_objects is True and removal_policy is not
         RemovalPolicy.DESTROY.
     """
 
@@ -72,7 +92,8 @@ class ProcessingBucket(Construct):
         scope: Construct,
         construct_id: str,
         *,
-        bucket_name: str,
+        bucket_name: str | None = None,
+        bucket_name_prefix: str | None = None,
         inventory_prefix: str,
         inventories: list[tuple[str, str]],
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
@@ -86,13 +107,36 @@ class ProcessingBucket(Construct):
                 "auto_delete_objects=True requires removal_policy=RemovalPolicy.DESTROY"
             )
 
-        self.bucket_name = bucket_name
+        if (bucket_name is None) == (bucket_name_prefix is None):
+            raise ValueError(
+                "exactly one of bucket_name (global namespace) or "
+                "bucket_name_prefix (account regional namespace) is required"
+            )
+
+        if bucket_name_prefix is not None:
+            # Compose the name CloudFormation will form rather than reading
+            # it back off the bucket. bucket.bucket_name is a Ref, and this
+            # bucket is its own inventory destination -- resolving that Ref
+            # into the destination ARN and the bucket policy it needs would
+            # be circular.
+            self.bucket_name = (
+                f"{bucket_name_prefix}-{Aws.ACCOUNT_ID}-{Aws.REGION}"
+                f"-{_ACCOUNT_REGIONAL_SUFFIX}"
+            )
+            name_props: dict[str, Any] = {
+                "bucket_name_prefix": bucket_name_prefix,
+                "bucket_namespace": s3.BucketNamespace.ACCOUNT_REGIONAL,
+            }
+        else:
+            assert bucket_name is not None
+            self.bucket_name = bucket_name
+            name_props = {"bucket_name": bucket_name}
+
         self.inventory_prefix = inventory_prefix
 
         self.bucket = s3.Bucket(
             self,
             "Bucket",
-            bucket_name=bucket_name,
             removal_policy=removal_policy,
             auto_delete_objects=auto_delete_objects,
             enforce_ssl=True,
@@ -104,17 +148,17 @@ class ProcessingBucket(Construct):
                     noncurrent_version_expiration=Duration.days(1),
                 ),
             ],
+            **name_props,
         )
 
-        # Use from_bucket_arn with a literal ARN (not a CDK token) so CDK does
-        # not call add_to_resource_policy on the destination. When source ==
-        # destination that creates a BucketPolicy <-> Bucket circular
-        # dependency. The explicit add_to_resource_policy call below provides
-        # the grant.
+        # Import the destination rather than passing self.bucket, so CDK does
+        # not call add_to_resource_policy on it. When source == destination
+        # that creates a BucketPolicy <-> Bucket circular dependency. The
+        # explicit add_to_resource_policy call below provides the grant.
         inventory_dest = s3.Bucket.from_bucket_arn(
             self,
             "InventoryDest",
-            f"arn:aws:s3:::{bucket_name}",
+            f"arn:aws:s3:::{self.bucket_name}",
         )
 
         for inventory_id, objects_prefix in inventories:
