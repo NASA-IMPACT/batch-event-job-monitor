@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from aws_cdk import App, Duration, Stack, aws_sqs as sqs
+from aws_cdk import (
+    App,
+    Duration,
+    RemovalPolicy,
+    Stack,
+    aws_kms as kms,
+    aws_sqs as sqs,
+)
 from aws_cdk.assertions import Template
 
 
@@ -103,3 +110,70 @@ class TestAdoptedQueues:
         assert construct.failure_dlq is existing
         # existing + retry + retry DLQ + untracked + event DLQ
         Template.from_stack(stack).resource_count_is("AWS::SQS::Queue", 5)
+
+
+class TestEncryption:
+    """Encryption at rest applies uniformly to every queue created here."""
+
+    def test_defaults_to_sqs_managed_in_the_template(self) -> None:
+        # Explicit in the template, not merely true at the SQS API: an
+        # unset property reads as unencrypted to an auditor.
+        stack, _ = _make_stack()
+        queues = _queues(Template.from_stack(stack))
+        assert len(queues) == 5
+        assert all(props["SqsManagedSseEnabled"] is True for props in queues.values())
+        assert not any("KmsMasterKeyId" in props for props in queues.values())
+
+    def test_unencrypted_opts_every_queue_out(self) -> None:
+        stack, _ = _make_stack(encryption=sqs.QueueEncryption.UNENCRYPTED)
+        queues = _queues(Template.from_stack(stack))
+        assert len(queues) == 5
+        assert all(props["SqsManagedSseEnabled"] is False for props in queues.values())
+
+    def test_customer_managed_key_applies_to_every_queue(self) -> None:
+        from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
+
+        app = App()
+        stack = Stack(app, "TestStack")
+        key = kms.Key(stack, "Key")
+        MonitoringQueues(stack, "Queues", encryption_master_key=key)
+
+        queues = _queues(Template.from_stack(stack))
+        assert len(queues) == 5
+        assert all("KmsMasterKeyId" in props for props in queues.values())
+
+    def test_explicit_encryption_mode_applies_to_every_queue(self) -> None:
+        stack, _ = _make_stack(encryption=sqs.QueueEncryption.KMS_MANAGED)
+        queues = _queues(Template.from_stack(stack))
+        assert all(
+            props["KmsMasterKeyId"] == "alias/aws/sqs" for props in queues.values()
+        )
+
+    def test_data_key_reuse_applies_to_every_queue(self) -> None:
+        stack, _ = _make_stack(
+            encryption=sqs.QueueEncryption.KMS_MANAGED,
+            data_key_reuse=Duration.minutes(20),
+        )
+        queues = _queues(Template.from_stack(stack))
+        assert all(
+            props["KmsDataKeyReusePeriodSeconds"] == 1200 for props in queues.values()
+        )
+
+    def test_enforce_ssl_can_be_turned_off(self) -> None:
+        stack, _ = _make_stack(enforce_ssl=False)
+        Template.from_stack(stack).resource_count_is("AWS::SQS::QueuePolicy", 0)
+
+
+class TestRemovalPolicy:
+    def test_defaults_to_the_cdk_queue_default(self) -> None:
+        stack, _ = _make_stack()
+        resources = Template.from_stack(stack).to_json()["Resources"]
+        queues = [r for r in resources.values() if r["Type"] == "AWS::SQS::Queue"]
+        assert all(q.get("DeletionPolicy", "Delete") == "Delete" for q in queues)
+
+    def test_retain_applies_to_every_queue(self) -> None:
+        stack, _ = _make_stack(removal_policy=RemovalPolicy.RETAIN)
+        resources = Template.from_stack(stack).to_json()["Resources"]
+        queues = [r for r in resources.values() if r["Type"] == "AWS::SQS::Queue"]
+        assert len(queues) == 5
+        assert all(q["DeletionPolicy"] == "Retain" for q in queues)
