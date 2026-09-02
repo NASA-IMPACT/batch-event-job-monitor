@@ -1,6 +1,7 @@
 # CDK construct reference
 
 <!--toc:start-->
+
 - [Wiring it together](#wiring-it-together)
 - [`ProcessingBucket`](#processingbucket)
   - [Naming: global vs account regional namespace](#naming-global-vs-account-regional-namespace)
@@ -12,6 +13,7 @@
 - [`AthenaStateTable` and `AthenaOutputsTable`](#athenastatetable-and-athenaoutputstable)
 - [`PartitionKeySpec`](#partitionkeyspec)
 - [`job_type_config()`](#jobtypeconfig)
+
 <!--toc:end-->
 
 Everything in `batch_event_job_monitor_cdk`, what it creates, and what it needs from you.
