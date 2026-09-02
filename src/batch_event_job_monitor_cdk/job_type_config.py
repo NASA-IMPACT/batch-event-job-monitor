@@ -8,7 +8,7 @@ typed CDK Batch refs get reduced to those strings.
 
 from __future__ import annotations
 
-from aws_cdk import aws_batch as batch
+from aws_cdk import ArnFormat, Stack, Token, aws_batch as batch
 
 from batch_event_job_monitor.models import ExitCodeOutcomes, JobTypeConfig, RetryPolicy
 
@@ -19,10 +19,26 @@ def job_definition_family_arn(job_definition: batch.IJobDefinition) -> str:
     Batch resolves a family ARN (no revision) to whichever revision is
     currently ACTIVE, so resubmissions/rule scoping automatically follow a
     new revision without redeploying.
+
+    A job definition created in this app exposes an unresolved token for
+    its ARN, and the CfnJobDefinition ref behind it carries the revision --
+    so the revision cannot be stripped by string surgery here, and the
+    family ARN is rebuilt from job_definition_name instead, which CDK
+    derives revision-free. A job definition imported from a literal ARN is
+    handled as a string, which keeps its own partition/account/region
+    rather than assuming this stack's.
     """
     arn = job_definition.job_definition_arn
-    prefix, _, suffix = arn.rpartition(":")
-    return prefix if suffix.isdigit() else arn
+    if not Token.is_unresolved(arn):
+        prefix, _, suffix = arn.rpartition(":")
+        return prefix if suffix.isdigit() else arn
+
+    return Stack.of(job_definition).format_arn(
+        service="batch",
+        resource="job-definition",
+        resource_name=job_definition.job_definition_name,
+        arn_format=ArnFormat.SLASH_RESOURCE_NAME,
+    )
 
 
 def job_type_config(

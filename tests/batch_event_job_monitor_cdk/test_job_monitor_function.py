@@ -5,7 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from aws_cdk import App, Stack, aws_s3 as s3
+from aws_cdk import (
+    App,
+    Size,
+    Stack,
+    aws_batch as batch,
+    aws_ecs as ecs,
+    aws_s3 as s3,
+)
 from aws_cdk.assertions import Match, Template
 
 from batch_event_job_monitor.models import (
@@ -15,6 +22,7 @@ from batch_event_job_monitor.models import (
     RetryPolicy,
 )
 from batch_event_job_monitor_cdk.job_monitor_function import JobMonitorFunction
+from batch_event_job_monitor_cdk.job_type_config import job_type_config
 from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
 
 _JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/queue"
@@ -352,3 +360,56 @@ class TestMultipleJobTypes:
         stack, _ = _make_stack(job_type_configs=self._job_type_configs())
         template = Template.from_stack(stack)
         template.resource_count_is("AWS::Lambda::Function", 1)
+
+
+class TestJobDefinitionOwnedByThisApp:
+    """A job definition created in this app, not imported from an ARN.
+
+    Its ARN is a token whose ref carries the revision, so the tracked
+    rule's "{family_arn}:" prefix must be rebuilt from the revision-free
+    name -- otherwise the prefix reads "...job-definition/name:2:" and
+    matches no event at all.
+    """
+
+    def _stack(self) -> Stack:
+        app = App()
+        stack = Stack(
+            app, "TestStack", env={"account": "123456789012", "region": "us-west-2"}
+        )
+        job_definition = batch.EcsJobDefinition(
+            stack,
+            "JobDefinition",
+            job_definition_name="composites",
+            container=batch.EcsEc2ContainerDefinition(
+                stack,
+                "Container",
+                image=ecs.ContainerImage.from_registry("busybox"),
+                cpu=1,
+                memory=Size.mebibytes(512),
+            ),
+        )
+        job_queue = batch.JobQueue.from_job_queue_arn(stack, "JobQueue", _JOB_QUEUE_ARN)
+        JobMonitorFunction(
+            stack,
+            "Monitor",
+            processing_bucket=s3.Bucket(stack, "Bucket"),
+            job_type_configs={
+                "composite": job_type_config(
+                    job_queue=job_queue, job_definition=job_definition
+                )
+            },
+        )
+        return stack
+
+    def test_rule_prefix_has_no_revision_before_its_trailing_colon(self) -> None:
+        template = Template.from_stack(self._stack())
+        [rule] = _tracked_rules(template)
+        [matcher] = rule["EventPattern"]["detail"]["jobDefinition"]
+        separator, parts = matcher["prefix"]["Fn::Join"]
+
+        assert separator == ""
+        assert parts[-1] == ":"
+        # Directly between the name and that colon there must be nothing.
+        assert isinstance(parts[-2], dict)
+        assert "Fn::Select" in parts[-2]
+        assert parts[-3].endswith(":job-definition/")

@@ -308,6 +308,6 @@ projection on string columns, and the construct raises for any other `glue_type`
 
 ## `job_type_config()`
 
-Builds one `JobTypeConfig` from typed CDK Batch refs, stripping any job-definition revision suffix so the family ARN is
-stored. Batch resolves a family ARN to whichever revision is currently `ACTIVE`, so rule scoping and resubmit routing
-follow a new revision without a redeploy. `job_definition_family_arn()` is the same stripping logic on its own.
+Builds one `JobTypeConfig` from typed CDK Batch refs, reducing the job definition to its family ARN (no revision). Batch
+resolves a family ARN to whichever revision is currently `ACTIVE`, so rule scoping and resubmit routing follow a new
+revision without a redeploy.
