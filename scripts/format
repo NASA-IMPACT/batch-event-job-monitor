@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
+uv run --frozen ruff check --fix
+uv run --frozen ruff format
+npx --yes prettier@3 --write README.md "docs/**/*.md"

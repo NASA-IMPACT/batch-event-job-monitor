@@ -1,0 +1,495 @@
+from __future__ import annotations
+
+import enum
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any
+
+
+class _Kind(enum.Enum):
+    """Internal lifecycle/routing archetype a ProcessingState behaves as.
+
+    Not exposed publicly -- consumers describe custom terminal outcomes via
+    ExitCodeOutcome.retryable/.dlq, never by constructing a ProcessingState
+    or picking a _Kind directly.
+    """
+
+    SUBMITTED = enum.auto()
+    AWAITING = enum.auto()
+    SUCCESS = enum.auto()
+    RETRYABLE_FAILURE = enum.auto()
+    NONRETRYABLE_FAILURE = enum.auto()
+
+
+@dataclass(frozen=True)
+class ProcessingState:
+    """A job's processing state.
+
+    Not a closed enum. SUBMITTED/AWAITING/SUCCESS/FAILURE_RETRYABLE/
+    FAILURE_NONRETRYABLE are provided by ProcessingStates below as the
+    built-in lifecycle, but a job_type's ExitCodeOutcomes can produce
+    additional named terminal states (e.g. "CLOUDY") that behave like
+    FAILURE_RETRYABLE or FAILURE_NONRETRYABLE for routing/terminality
+    purposes while using their own name in the S3 key and canonical
+    record, the same way SUCCESS/FAILURE_RETRYABLE/FAILURE_NONRETRYABLE do.
+
+    This name-carries-meaning design is why job classification stays
+    data-driven (see ExitCodeOutcome) rather than requiring a Python
+    callback: a new terminal outcome is just a new entry in a job_type's
+    exit-code table, not a new ProcessingState member to ship a code change
+    for.
+    """
+
+    name: str
+    kind: _Kind
+    dlq: bool = True
+
+    @property
+    def retryable(self) -> bool:
+        """True if this state's terminality depends on attempt exhaustion."""
+        return self.kind is _Kind.RETRYABLE_FAILURE
+
+    @property
+    def rank(self) -> int:
+        """Lifecycle rank, for detecting out-of-order/stale transitions."""
+        if self.kind is _Kind.SUBMITTED:
+            return 0
+        if self.kind is _Kind.AWAITING:
+            return 1
+        return 2
+
+    def is_terminal(self, attempt: int, retry_policy: RetryPolicy) -> bool:
+        """Determine if this state is terminal.
+
+        Parameters
+        ----------
+        attempt : int
+            The current attempt number.
+        retry_policy : RetryPolicy
+            The retry policy configuration.
+
+        Returns
+        -------
+        bool
+            True if the state is terminal, False otherwise.
+        """
+        if self.kind in (_Kind.SUBMITTED, _Kind.AWAITING):
+            return False
+        if self.kind is _Kind.RETRYABLE_FAILURE:
+            return attempt >= retry_policy.max_attempts
+        return True
+
+
+class ProcessingStates:
+    """Registry of the built-in ProcessingState lifecycle members.
+
+    Kept separate from ProcessingState itself so that class stays a plain
+    value type -- the type flowing through classify()/find_state_pointer()/
+    etc, including job_type-specific custom states that never appear here.
+    """
+
+    SUBMITTED = ProcessingState(name="SUBMITTED", kind=_Kind.SUBMITTED)
+    AWAITING = ProcessingState(name="AWAITING", kind=_Kind.AWAITING)
+    SUCCESS = ProcessingState(name="SUCCESS", kind=_Kind.SUCCESS)
+    FAILURE_RETRYABLE = ProcessingState(
+        name="FAILURE_RETRYABLE", kind=_Kind.RETRYABLE_FAILURE
+    )
+    FAILURE_NONRETRYABLE = ProcessingState(
+        name="FAILURE_NONRETRYABLE", kind=_Kind.NONRETRYABLE_FAILURE
+    )
+
+
+# The bounded set of states a job_type with no custom ExitCodeOutcomes can
+# produce. S3RecordStore's lookup methods scan over this by default; pass
+# ExitCodeOutcomes.states() instead for a job_type that declares custom
+# terminal outcomes, so pointers in those states are found too.
+BASELINE_PROCESSING_STATES: tuple[ProcessingState, ...] = (
+    ProcessingStates.SUBMITTED,
+    ProcessingStates.AWAITING,
+    ProcessingStates.SUCCESS,
+    ProcessingStates.FAILURE_RETRYABLE,
+    ProcessingStates.FAILURE_NONRETRYABLE,
+)
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Configuration for job retry behavior."""
+
+    max_attempts: int = 3
+    spot_interruption_status_reason_prefixes: tuple[str, ...] = ("Host EC2",)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Encode for embedding in JobTypeConfig's deploy-time JSON."""
+        return {
+            "max_attempts": self.max_attempts,
+            "spot_interruption_status_reason_prefixes": list(
+                self.spot_interruption_status_reason_prefixes
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RetryPolicy:
+        """Decode from JobTypeConfig's deploy-time JSON. Missing keys default."""
+        kwargs: dict[str, Any] = {}
+        if "max_attempts" in data:
+            kwargs["max_attempts"] = data["max_attempts"]
+        if "spot_interruption_status_reason_prefixes" in data:
+            kwargs["spot_interruption_status_reason_prefixes"] = tuple(
+                data["spot_interruption_status_reason_prefixes"]
+            )
+        return cls(**kwargs)
+
+
+PARAM_PREFIX = "bejm_"
+_MAX_BATCH_JOB_NAME_LENGTH = 128
+_JOB_NAME_HASH_LENGTH = 8
+
+
+@dataclass(frozen=True)
+class JobContext:
+    """Identifying and partitioning fields for one input entity's
+    processing event.
+
+    A Batch job may cover several input entities sharing one output (see
+    JobGroup, e.g. twin granules or many source granules composited into
+    one output) -- JobContext is the per-entity unit each gets its own
+    canonical record/state pointer under, built via JobGroup.contexts().
+    """
+
+    job_type: str
+    partition_fields: dict[str, str]
+    input_entity_id: str
+    output_entity_id: str
+    attempt: int
+
+
+@dataclass(frozen=True)
+class JobGroup:
+    """A Batch job's full identity, covering however many input entities it
+    processes.
+
+    One for the common case; several for many-to-one jobs (twin granules,
+    or many source granules composited into one output). One
+    classification and one retry decision apply to the whole group, but
+    each entity still gets its own canonical record/state pointer -- see
+    `contexts()`.
+    """
+
+    job_type: str
+    partition_fields: dict[str, str]
+    input_entity_ids: list[str]
+    output_entity_id: str
+    attempt: int
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        job_type: str,
+        partition_fields: dict[str, str],
+        input_entity_ids: list[str],
+        output_entity_id: str,
+    ) -> JobGroup:
+        """Build a JobGroup for brand-new entities, at attempt 1."""
+        return cls(
+            job_type=job_type,
+            partition_fields=partition_fields,
+            input_entity_ids=input_entity_ids,
+            output_entity_id=output_entity_id,
+            attempt=1,
+        )
+
+    def next_attempt(self) -> JobGroup:
+        """This group, advanced to its next attempt."""
+        return replace(self, attempt=self.attempt + 1)
+
+    def contexts(self) -> list[JobContext]:
+        """One JobContext per input entity, sharing this group's identity."""
+        return [
+            JobContext(
+                job_type=self.job_type,
+                partition_fields=self.partition_fields,
+                input_entity_id=input_entity_id,
+                output_entity_id=self.output_entity_id,
+                attempt=self.attempt,
+            )
+            for input_entity_id in self.input_entity_ids
+        ]
+
+    def batch_job_name(self) -> str:
+        """A Batch-safe jobName for this group, bounded to 128 chars.
+
+        AWS Batch caps jobName at 128 characters. Appends a short hash of
+        (job_type, input_entity_ids, attempt) and truncates the
+        human-readable prefix to fit, so distinct groups never collide
+        even once truncated.
+        """
+        entity_ids = ",".join(self.input_entity_ids)
+        digest = hashlib.sha256(
+            f"{self.job_type}:{entity_ids}:{self.attempt}".encode()
+        ).hexdigest()[:_JOB_NAME_HASH_LENGTH]
+        suffix = f"-{digest}"
+        prefix = f"{self.job_type}-{entity_ids}-{self.attempt}"
+        return prefix[: _MAX_BATCH_JOB_NAME_LENGTH - len(suffix)] + suffix
+
+    def to_batch_parameters(self) -> dict[str, str]:
+        """Encode this group as AWS Batch SubmitJobRequest.parameters.
+
+        Consumers merge these into their own `parameters` dict when calling
+        `submit_job` (directly, or via `resubmit_job`) so that
+        JobMonitorFunction's bundled handler can reconstruct the JobGroup
+        from the EventBridge job state-change event with no
+        consumer-authored Lambda code.
+
+        AWS Batch echoes `parameters` back into the event `detail` for
+        every state change of that job's life.
+        """
+        return {
+            f"{PARAM_PREFIX}job_type": self.job_type,
+            f"{PARAM_PREFIX}input_entity_ids": json.dumps(self.input_entity_ids),
+            f"{PARAM_PREFIX}output_entity_id": self.output_entity_id,
+            f"{PARAM_PREFIX}partition_fields": json.dumps(
+                self.partition_fields, sort_keys=True
+            ),
+            f"{PARAM_PREFIX}attempt": str(self.attempt),
+        }
+
+
+@dataclass(frozen=True)
+class ExitCodeOutcome:
+    """A named outcome for one Batch container exit code.
+
+    Attributes
+    ----------
+    name : str
+        Becomes this outcome's ProcessingState name -- used directly in
+        the state-pointer/output-index keys and the canonical record, the
+        same way SUCCESS/FAILURE_RETRYABLE/FAILURE_NONRETRYABLE are for
+        the built-in states.
+    dlq : bool
+        Whether a terminal instance of this outcome should route to the
+        dead-letter queue.
+    retryable : bool, optional
+        Whether this outcome's terminality is exhaustion-gated (like
+        FAILURE_RETRYABLE) or immediate (like FAILURE_NONRETRYABLE).
+        Defaults to False.
+    """
+
+    name: str
+    dlq: bool
+    retryable: bool = False
+
+    def to_processing_state(self) -> ProcessingState:
+        """This outcome as a ProcessingState."""
+        kind = _Kind.RETRYABLE_FAILURE if self.retryable else _Kind.NONRETRYABLE_FAILURE
+        return ProcessingState(name=self.name, kind=kind, dlq=self.dlq)
+
+
+@dataclass(frozen=True)
+class ExitCodeOutcomes:
+    """Exit-code -> ExitCodeOutcome mapping.
+
+    Deploy-time, per-job_type configuration (tied to a container image's
+    exit-code taxonomy, not to any individual job) -- carried via
+    JobTypeConfig, not per-job Batch parameters, so a mapping change never
+    needs to be duplicated across every job of that type.
+    """
+
+    by_exit_code: dict[int, ExitCodeOutcome] = field(default_factory=dict)
+
+    def get(self, exit_code: int | None) -> ExitCodeOutcome | None:
+        """The outcome for exit_code, or None if unmapped or exit_code is None."""
+        return None if exit_code is None else self.by_exit_code.get(exit_code)
+
+    def states(self) -> tuple[ProcessingState, ...]:
+        """The bounded set of ProcessingStates this job_type can produce.
+
+        Baseline lifecycle states plus one ProcessingState per distinct
+        declared outcome name (exit codes sharing a name collapse to one
+        state). Pass to S3RecordStore's lookup methods so they scan for a
+        job_type's full set of possible pointers, not just the five
+        built-in states.
+        """
+        declared: dict[str, ProcessingState] = {}
+        for outcome in self.by_exit_code.values():
+            declared[outcome.name] = outcome.to_processing_state()
+        return BASELINE_PROCESSING_STATES + tuple(declared.values())
+
+    def to_dict(self) -> dict[str, Any]:
+        """Encode for embedding in JobTypeConfig's deploy-time JSON."""
+        return {
+            str(code): {
+                "name": outcome.name,
+                "retryable": outcome.retryable,
+                "dlq": outcome.dlq,
+            }
+            for code, outcome in self.by_exit_code.items()
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExitCodeOutcomes:
+        """Decode from JobTypeConfig's deploy-time JSON."""
+        return cls(
+            {int(code): ExitCodeOutcome(**fields) for code, fields in data.items()}
+        )
+
+
+@dataclass
+class ExitCodeOutcomesBuilder:
+    """Fluent builder for ExitCodeOutcomes.
+
+    >>> outcomes = (
+    ...     ExitCodeOutcomesBuilder()
+    ...     .add(3, "LOW_SUN_ANGLE", dlq=False)
+    ...     .add(4, "CLOUDY", dlq=False)
+    ...     .build()
+    ... )
+    """
+
+    outcomes: dict[int, ExitCodeOutcome] = field(default_factory=dict)
+
+    def add(
+        self,
+        exit_code: int,
+        name: str,
+        *,
+        dlq: bool,
+        retryable: bool = False,
+    ) -> ExitCodeOutcomesBuilder:
+        """Map exit_code to a new ExitCodeOutcome. Returns self for chaining."""
+        self.outcomes[exit_code] = ExitCodeOutcome(
+            name=name, retryable=retryable, dlq=dlq
+        )
+        return self
+
+    def build(self) -> ExitCodeOutcomes:
+        """Build the immutable ExitCodeOutcomes mapping."""
+        return ExitCodeOutcomes(dict(self.outcomes))
+
+
+@dataclass(frozen=True)
+class JobTypeConfig:
+    """Deploy-time config for one job_type.
+
+    Attributes
+    ----------
+    job_queue_arn : str
+        ARN of the Batch job queue this job_type's jobs are submitted to.
+        Required -- JobMonitorFunction scopes its EventBridge rule to this
+        queue, and JobResubmitFunction's default handler routes
+        resubmissions to it by job_type.
+    job_definition_arn : str
+        ARN of the Batch job definition this job_type's jobs use, with any
+        revision suffix stripped (the family ARN). Required, for the same
+        reasons as job_queue_arn -- rule scoping and resubmit routing.
+    retry_policy : RetryPolicy, optional
+        Retry behavior for this job_type. Tied to a container image/tag --
+        a redeploy is required to change it. Some job types are flakier
+        than others (e.g. those calling external services), so this is
+        genuinely job_type-specific. Defaults to RetryPolicy().
+    exit_code_outcomes : ExitCodeOutcomes, optional
+        This job_type's exit-code taxonomy. Always container-specific, so
+        deploy-time like retry_policy. Defaults to no custom outcomes.
+
+    JobMonitorFunction resolves one JobTypeConfig per job_type from a
+    single deploy-time env var; there is no per-job or per-invocation
+    override.
+    """
+
+    job_queue_arn: str
+    job_definition_arn: str
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    exit_code_outcomes: ExitCodeOutcomes = field(default_factory=ExitCodeOutcomes)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Encode for embedding in JobMonitorFunction's deploy-time JSON."""
+        return {
+            "job_queue_arn": self.job_queue_arn,
+            "job_definition_arn": self.job_definition_arn,
+            "retry_policy": self.retry_policy.to_dict(),
+            "exit_code_outcomes": self.exit_code_outcomes.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> JobTypeConfig:
+        """Decode from JobMonitorFunction's deploy-time JSON."""
+        return cls(
+            job_queue_arn=data["job_queue_arn"],
+            job_definition_arn=data["job_definition_arn"],
+            retry_policy=RetryPolicy.from_dict(data.get("retry_policy", {})),
+            exit_code_outcomes=ExitCodeOutcomes.from_dict(
+                data.get("exit_code_outcomes", {})
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RetryMessage:
+    """SQS message body for the retry queue / DLQ.
+
+    Fields are flat (mirroring JobGroup's own fields plus batch_job_id and
+    state) rather than nesting a `job_group: JobGroup` field, so the JSON
+    wire format stays a single flat object instead of nesting `job_group`
+    under its own key.
+    """
+
+    job_type: str
+    partition_fields: dict[str, str]
+    input_entity_ids: list[str]
+    output_entity_id: str
+    attempt: int
+    batch_job_id: str
+    state: str
+
+    @classmethod
+    def from_job_group(
+        cls, job_group: JobGroup, *, batch_job_id: str, state: str
+    ) -> RetryMessage:
+        """Build a RetryMessage from a JobGroup plus the Batch job id and state."""
+        return cls(**asdict(job_group), batch_job_id=batch_job_id, state=state)
+
+    @property
+    def job_group(self) -> JobGroup:
+        """The JobGroup this message was built from."""
+        return JobGroup(
+            job_type=self.job_type,
+            partition_fields=self.partition_fields,
+            input_entity_ids=self.input_entity_ids,
+            output_entity_id=self.output_entity_id,
+            attempt=self.attempt,
+        )
+
+    def to_json(self) -> str:
+        """Serialize to the SQS message body JSON string."""
+        return json.dumps(asdict(self))
+
+    @classmethod
+    def from_json(cls, body: str) -> RetryMessage:
+        """Parse an SQS message body JSON string into a RetryMessage."""
+        return cls(**json.loads(body))
+
+
+@dataclass
+class ProcessingEventRecord:
+    """Record of a processing event."""
+
+    state: str
+    timestamp: str
+    batch_job_id: str | None = None
+    exit_code: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary, dropping None-valued fields.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionary representation with None fields excluded.
+        """
+        result: dict[str, Any] = {}
+        for key, value in asdict(self).items():
+            if value is not None:
+                result[key] = value
+        return result
