@@ -686,9 +686,13 @@ def run_reconcile(
             ),
             workgroup=config.workgroup,
         )
-        skip_header = True
-    else:
-        skip_header = False
+
+    # The header row only appears on a result set's first page. next_token
+    # absent means this call is fetching page one, whether or not the query
+    # was just started here -- that is the only reliable signal, since a
+    # caller could in principle pass a query_execution_id without a
+    # next_token.
+    skip_header = next_token is None
 
     enqueued = 0
     while True:

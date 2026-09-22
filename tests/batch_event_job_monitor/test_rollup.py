@@ -650,3 +650,45 @@ def test_reconcile_continues_an_existing_result_without_a_new_query(
 
     assert athena.started == []
     assert athena.requested_tokens == ["token-2"]
+    drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=10)
+    assert drained.keys == ["records/c.json"]
+
+
+def test_reconcile_pages_within_one_invocation_without_reskipping_a_header(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthenaResults(
+        ["SUCCEEDED"],
+        [
+            _page(["records/a.json"], "token-2", True),
+            _page(["records/b.json"], None, False),
+        ],
+    )
+    lambda_ = FakeLambda()
+
+    metrics = run_reconcile(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        depth=0,
+    )
+
+    assert metrics["ReconcileDrift"] == 2
+    drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=10)
+    assert sorted(drained.keys) == ["records/a.json", "records/b.json"]
+    assert athena.requested_tokens == [None, "token-2"]
+    assert lambda_.invocations == []
+
+
+def test_reconcile_on_a_converged_table_enqueues_nothing(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthenaResults(["SUCCEEDED"], [_page([], None, True)])
+
+    metrics = run_reconcile(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        depth=0,
+    )
+
+    assert metrics["ReconcileDrift"] == 0
+    assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
