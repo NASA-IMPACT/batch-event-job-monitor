@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
+from mypy_boto3_sqs import SQSClient
 
-from batch_event_job_monitor.rollup import MalformedRecord, record_to_row
+from batch_event_job_monitor.rollup import (
+    MalformedRecord,
+    drain_keys,
+    queue_has_messages,
+    record_to_row,
+)
 
 PARTITION_KEY_NAMES = ["job_type", "tile_id", "year_month"]
 
@@ -90,3 +97,47 @@ def test_row_rejects_a_record_missing_a_declared_partition_field() -> None:
         record_to_row(
             source_key=SOURCE_KEY, body=body, partition_key_names=PARTITION_KEY_NAMES
         )
+
+
+def _send(sqs: SQSClient, queue_url: str, key: str) -> None:
+    sqs.send_message(
+        QueueUrl=queue_url,
+        MessageBody=json.dumps({"detail": {"object": {"key": key}}}),
+    )
+
+
+def test_drain_deduplicates_repeated_keys(
+    sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    for _ in range(3):
+        _send(sqs, rollup_queue_url, "records/job_type=a/001.json")
+
+    drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=100)
+
+    assert drained.keys == ["records/job_type=a/001.json"]
+    assert len(drained.receipt_handles) == 3
+
+
+def test_drain_stops_at_the_cap(sqs: SQSClient, rollup_queue_url: str) -> None:
+    for index in range(12):
+        _send(sqs, rollup_queue_url, f"records/job_type=a/{index:03d}.json")
+
+    drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=5)
+
+    assert len(drained.keys) <= 5
+
+
+def test_drain_of_an_empty_queue_returns_nothing(
+    sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=100)
+    assert drained.keys == []
+    assert drained.receipt_handles == []
+
+
+def test_queue_has_messages_reflects_queue_state(
+    sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
+    _send(sqs, rollup_queue_url, "records/job_type=a/001.json")
+    assert queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)

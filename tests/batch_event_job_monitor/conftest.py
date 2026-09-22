@@ -61,3 +61,8 @@ def retry_queue_url(sqs: SQSClient) -> str:
 @pytest.fixture
 def dlq_url(sqs: SQSClient) -> str:
     return sqs.create_queue(QueueName="test-dlq")["QueueUrl"]
+
+
+@pytest.fixture
+def rollup_queue_url(sqs: SQSClient) -> str:
+    return sqs.create_queue(QueueName="test-rollup-queue")["QueueUrl"]
