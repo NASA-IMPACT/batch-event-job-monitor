@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import tempfile
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -313,3 +315,61 @@ def write_staging_object(
     finally:
         os.unlink(path)
     return key
+
+
+_TERMINAL_FAILURES = ("FAILED", "CANCELLED")
+
+
+class AthenaQueryError(RuntimeError):
+    """Raised when an Athena query reaches a terminal failure state."""
+
+
+def run_query(
+    *,
+    athena_client: Any,
+    sql: str,
+    workgroup: str,
+    poll_seconds: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Start an Athena query and block until it reaches a terminal state.
+
+    Parameters
+    ----------
+    athena_client : Any
+        Boto3 Athena client.
+    sql : str
+        Statement to execute.
+    workgroup : str
+        Athena workgroup, which supplies the result location.
+    poll_seconds : float, optional
+        Delay between status polls. Defaults to 1.0.
+    sleep : Callable[[float], None], optional
+        Sleep function, injected so tests need not wait.
+
+    Returns
+    -------
+    str
+        The query execution id.
+
+    Raises
+    ------
+    AthenaQueryError
+        If the query ends in FAILED or CANCELLED.
+    """
+    query_id = athena_client.start_query_execution(
+        QueryString=sql,
+        WorkGroup=workgroup,
+    )["QueryExecutionId"]
+
+    while True:
+        status = athena_client.get_query_execution(QueryExecutionId=query_id)[
+            "QueryExecution"
+        ]["Status"]
+        state = status["State"]
+        if state == "SUCCEEDED":
+            return str(query_id)
+        if state in _TERMINAL_FAILURES:
+            reason = status.get("StateChangeReason", state)
+            raise AthenaQueryError(f"Athena query {query_id} {state}: {reason}")
+        sleep(poll_seconds)

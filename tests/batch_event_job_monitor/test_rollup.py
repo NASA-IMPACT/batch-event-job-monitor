@@ -11,11 +11,13 @@ from mypy_boto3_s3 import S3Client
 from mypy_boto3_sqs import SQSClient
 
 from batch_event_job_monitor.rollup import (
+    AthenaQueryError,
     MalformedRecord,
     drain_keys,
     fetch_rows,
     queue_has_messages,
     record_to_row,
+    run_query,
     write_staging_object,
 )
 
@@ -266,3 +268,45 @@ def test_staging_object_is_gzipped_ndjson(s3: S3Client, bucket: str) -> None:
     lines = gzip.decompress(raw).decode().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["tile_id"] == "12TVK"
+
+
+class FakeAthena:
+    """Minimal Athena client returning a scripted sequence of states."""
+
+    def __init__(self, states: list[str]) -> None:
+        self.states = states
+        self.started: list[str] = []
+
+    def start_query_execution(self, **kwargs: Any) -> dict[str, str]:
+        self.started.append(kwargs["QueryString"])
+        return {"QueryExecutionId": "qid-1"}
+
+    def get_query_execution(self, **kwargs: Any) -> dict[str, Any]:
+        state = self.states.pop(0)
+        return {
+            "QueryExecution": {"Status": {"State": state, "StateChangeReason": "boom"}}
+        }
+
+
+def test_run_query_returns_the_execution_id_on_success() -> None:
+    client = FakeAthena(["RUNNING", "SUCCEEDED"])
+    query_id = run_query(
+        athena_client=client,
+        sql="SELECT 1",
+        workgroup="wg",
+        sleep=lambda _: None,
+    )
+    assert query_id == "qid-1"
+    assert client.started == ["SELECT 1"]
+
+
+@pytest.mark.parametrize("state", ["FAILED", "CANCELLED"])
+def test_run_query_raises_on_a_terminal_failure(state: str) -> None:
+    client = FakeAthena([state])
+    with pytest.raises(AthenaQueryError, match="boom"):
+        run_query(
+            athena_client=client,
+            sql="SELECT 1",
+            workgroup="wg",
+            sleep=lambda _: None,
+        )
