@@ -242,7 +242,13 @@ def fetch_rows(
                 body=json.loads(raw),
                 partition_key_names=partition_key_names,
             )
-        except (json.JSONDecodeError, MalformedRecord, KeyError):
+        except (
+            json.JSONDecodeError,
+            MalformedRecord,
+            KeyError,
+            TypeError,
+            AttributeError,
+        ):
             logger.warning("Skipping unreadable record %s", key)
             return "malformed"
 

@@ -195,6 +195,42 @@ def test_fetch_skips_and_counts_malformed_json(s3: S3Client, bucket: str) -> Non
     assert result.malformed == 1
 
 
+@pytest.mark.parametrize("body", [b"42", b"[1, 2, 3]"])
+def test_fetch_skips_and_counts_valid_json_that_is_not_an_object(
+    s3: S3Client, bucket: str, body: bytes
+) -> None:
+    s3.put_object(Bucket=bucket, Key="records/not-an-object.json", Body=body)
+
+    result = fetch_rows(
+        s3_client=s3,
+        bucket=bucket,
+        keys=["records/not-an-object.json"],
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+
+    assert result.rows == []
+    assert result.malformed == 1
+    assert result.missing == 0
+
+
+def test_fetch_counts_a_non_object_record_without_discarding_a_good_row(
+    s3: S3Client, bucket: str
+) -> None:
+    _put_record(s3, bucket, SOURCE_KEY, _body())
+    s3.put_object(Bucket=bucket, Key="records/not-an-object.json", Body=b"42")
+
+    result = fetch_rows(
+        s3_client=s3,
+        bucket=bucket,
+        keys=[SOURCE_KEY, "records/not-an-object.json"],
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+
+    assert len(result.rows) == 1
+    assert result.rows[0]["source_key"] == SOURCE_KEY
+    assert result.malformed == 1
+
+
 def test_fetch_returns_nothing_for_an_empty_key_list(s3: S3Client, bucket: str) -> None:
     result = fetch_rows(
         s3_client=s3,
