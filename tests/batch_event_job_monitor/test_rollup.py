@@ -290,23 +290,28 @@ class FakeAthena:
 
 def test_run_query_returns_the_execution_id_on_success() -> None:
     client = FakeAthena(["RUNNING", "SUCCEEDED"])
+    sleep_calls: list[float] = []
     query_id = run_query(
         athena_client=client,
         sql="SELECT 1",
         workgroup="wg",
-        sleep=lambda _: None,
+        poll_seconds=0.5,
+        sleep=sleep_calls.append,
     )
     assert query_id == "qid-1"
     assert client.started == ["SELECT 1"]
+    assert sleep_calls == [0.5]
 
 
 @pytest.mark.parametrize("state", ["FAILED", "CANCELLED"])
 def test_run_query_raises_on_a_terminal_failure(state: str) -> None:
     client = FakeAthena([state])
+    sleep_calls: list[float] = []
     with pytest.raises(AthenaQueryError, match="boom"):
         run_query(
             athena_client=client,
             sql="SELECT 1",
             workgroup="wg",
-            sleep=lambda _: None,
+            sleep=sleep_calls.append,
         )
+    assert sleep_calls == []
