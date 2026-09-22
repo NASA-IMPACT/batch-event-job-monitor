@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
+
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
 _RECEIVE_BATCH = 10
+
+_MISSING_OBJECT_CODES = ("NoSuchKey", "404", "NotFound")
 
 
 class MalformedRecord(ValueError):
@@ -165,3 +173,137 @@ def queue_has_messages(*, sqs_client: Any, queue_url: str) -> bool:
         AttributeNames=["ApproximateNumberOfMessages"],
     )["Attributes"]
     return int(attributes["ApproximateNumberOfMessages"]) > 0
+
+
+@dataclass
+class FetchResult:
+    """Outcome of fetching a batch of canonical records.
+
+    Attributes
+    ----------
+    rows : list[dict[str, Any]]
+        Successfully flattened rows.
+    missing : int
+        Objects that no longer exist. Not an error: the object was deleted
+        between notification and read.
+    malformed : int
+        Objects that could not be parsed or flattened.
+    """
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    missing: int = 0
+    malformed: int = 0
+
+
+def fetch_rows(
+    *,
+    s3_client: Any,
+    bucket: str,
+    keys: list[str],
+    partition_key_names: list[str],
+    max_workers: int = 32,
+) -> FetchResult:
+    """Fetch and flatten canonical records concurrently.
+
+    A 404 on a source object is not an error -- the object was deleted
+    between notification and read -- and is counted as missing rather than
+    raised. Malformed JSON is likewise counted rather than raised, because
+    the weekly reconcile pass re-surfaces it.
+
+    Parameters
+    ----------
+    s3_client : Any
+        Boto3 S3 client.
+    bucket : str
+        Processing bucket name.
+    keys : list[str]
+        Distinct record object keys.
+    partition_key_names : list[str]
+        Ordered partition key names, job_type first.
+    max_workers : int, optional
+        Thread pool size. Defaults to 32.
+
+    Returns
+    -------
+    FetchResult
+        Rows plus counts of missing and malformed objects.
+    """
+
+    def fetch_one(key: str) -> dict[str, Any] | str:
+        try:
+            raw = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in _MISSING_OBJECT_CODES:
+                return "missing"
+            raise
+        try:
+            return record_to_row(
+                source_key=key,
+                body=json.loads(raw),
+                partition_key_names=partition_key_names,
+            )
+        except (json.JSONDecodeError, MalformedRecord, KeyError):
+            logger.warning("Skipping unreadable record %s", key)
+            return "malformed"
+
+    result = FetchResult()
+    if not keys:
+        return result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for outcome in pool.map(fetch_one, keys):
+            if isinstance(outcome, str):
+                if outcome == "missing":
+                    result.missing += 1
+                else:
+                    result.malformed += 1
+            else:
+                result.rows.append(outcome)
+    return result
+
+
+def write_staging_object(
+    *,
+    s3_client: Any,
+    bucket: str,
+    staging_prefix: str,
+    run_id: str,
+    rows: list[dict[str, Any]],
+) -> str:
+    """Write rows as one gzipped NDJSON object under the staging prefix.
+
+    The gzip stream is written to a temporary file rather than buffered in
+    memory, so a large backlog (up to 25,000 objects in one run) cannot
+    exhaust the Lambda heap.
+
+    Parameters
+    ----------
+    s3_client : Any
+        Boto3 S3 client.
+    bucket : str
+        Processing bucket name.
+    staging_prefix : str
+        Key prefix for staging objects, with a trailing slash.
+    run_id : str
+        Staging partition value for this run.
+    rows : list[dict[str, Any]]
+        Rows to write.
+
+    Returns
+    -------
+    str
+        The S3 key written.
+    """
+    key = f"{staging_prefix}run_id={run_id}/part.ndjson.gz"
+    with tempfile.NamedTemporaryFile(suffix=".ndjson.gz", delete=False) as handle:
+        path = handle.name
+    try:
+        with gzip.open(path, "wt", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row))
+                stream.write("\n")
+        with open(path, "rb") as body:
+            s3_client.put_object(Bucket=bucket, Key=key, Body=body)
+    finally:
+        os.unlink(path)
+    return key

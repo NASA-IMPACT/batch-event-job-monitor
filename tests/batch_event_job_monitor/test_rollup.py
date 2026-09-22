@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from typing import Any
 
 import pytest
+from mypy_boto3_s3 import S3Client
 from mypy_boto3_sqs import SQSClient
 
 from batch_event_job_monitor.rollup import (
     MalformedRecord,
     drain_keys,
+    fetch_rows,
     queue_has_messages,
     record_to_row,
+    write_staging_object,
 )
 
 PARTITION_KEY_NAMES = ["job_type", "tile_id", "year_month"]
+
+RUN_ID = "0f9d7a1c-2b3e-4c5d-8e9f-0a1b2c3d4e5f"
 
 SOURCE_KEY = (
     "records/job_type=monthly-composite/tile_id=12TVK/year_month=2024-06/"
@@ -141,3 +147,86 @@ def test_queue_has_messages_reflects_queue_state(
     assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
     _send(sqs, rollup_queue_url, "records/job_type=a/001.json")
     assert queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
+
+
+def _put_record(s3: S3Client, bucket: str, key: str, body: dict[str, Any]) -> None:
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(body).encode())
+
+
+def test_fetch_returns_one_row_per_object(s3: S3Client, bucket: str) -> None:
+    _put_record(s3, bucket, SOURCE_KEY, _body())
+
+    result = fetch_rows(
+        s3_client=s3,
+        bucket=bucket,
+        keys=[SOURCE_KEY],
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+
+    assert len(result.rows) == 1
+    assert result.rows[0]["source_key"] == SOURCE_KEY
+    assert result.missing == 0
+    assert result.malformed == 0
+
+
+def test_fetch_skips_and_counts_a_missing_object(s3: S3Client, bucket: str) -> None:
+    result = fetch_rows(
+        s3_client=s3,
+        bucket=bucket,
+        keys=["records/job_type=a/gone.json"],
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+
+    assert result.rows == []
+    assert result.missing == 1
+
+
+def test_fetch_skips_and_counts_malformed_json(s3: S3Client, bucket: str) -> None:
+    s3.put_object(Bucket=bucket, Key="records/bad.json", Body=b"{not json")
+
+    result = fetch_rows(
+        s3_client=s3,
+        bucket=bucket,
+        keys=["records/bad.json"],
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+
+    assert result.rows == []
+    assert result.malformed == 1
+
+
+def test_fetch_returns_nothing_for_an_empty_key_list(s3: S3Client, bucket: str) -> None:
+    result = fetch_rows(
+        s3_client=s3,
+        bucket=bucket,
+        keys=[],
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+
+    assert result.rows == []
+    assert result.missing == 0
+    assert result.malformed == 0
+
+
+def test_staging_object_is_gzipped_ndjson(s3: S3Client, bucket: str) -> None:
+    rows = [
+        record_to_row(
+            source_key=SOURCE_KEY,
+            body=_body(),
+            partition_key_names=PARTITION_KEY_NAMES,
+        )
+    ]
+
+    key = write_staging_object(
+        s3_client=s3,
+        bucket=bucket,
+        staging_prefix="staging/",
+        run_id=RUN_ID,
+        rows=rows,
+    )
+
+    assert key == f"staging/run_id={RUN_ID}/part.ndjson.gz"
+    raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    lines = gzip.decompress(raw).decode().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["tile_id"] == "12TVK"
