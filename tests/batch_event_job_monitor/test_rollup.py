@@ -20,6 +20,7 @@ from batch_event_job_monitor.rollup import (
     queue_has_messages,
     record_to_row,
     run_query,
+    run_reconcile,
     run_rollup,
     write_staging_object,
 )
@@ -567,3 +568,85 @@ def test_rollup_counts_a_failure_and_still_emits_metrics_on_a_failed_merge(
     cloudwatch_metrics = emitted["_aws"]["CloudWatchMetrics"][0]
     assert cloudwatch_metrics["Namespace"] == "BatchEventJobMonitor"
     assert cloudwatch_metrics["Metrics"] == _EXPECTED_METRIC_ENVELOPE
+
+
+class FakeAthenaResults(FakeAthena):
+    """Athena fake that also serves paged query results."""
+
+    def __init__(self, states: list[str], pages: list[dict[str, Any]]) -> None:
+        super().__init__(states)
+        self.pages = pages
+        self.requested_tokens: list[str | None] = []
+
+    def get_query_results(self, **kwargs: Any) -> dict[str, Any]:
+        self.requested_tokens.append(kwargs.get("NextToken"))
+        return self.pages.pop(0)
+
+
+def _page(keys: list[str], next_token: str | None, header: bool) -> dict[str, Any]:
+    rows = [{"Data": [{"VarCharValue": "source_key"}]}] if header else []
+    rows += [{"Data": [{"VarCharValue": key}]} for key in keys]
+    page: dict[str, Any] = {"ResultSet": {"Rows": rows}}
+    if next_token is not None:
+        page["NextToken"] = next_token
+    return page
+
+
+def test_reconcile_enqueues_keys_and_skips_the_header_row(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthenaResults(
+        ["SUCCEEDED"], [_page(["records/a.json", "records/b.json"], None, True)]
+    )
+
+    metrics = run_reconcile(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        depth=0,
+    )
+
+    assert metrics["ReconcileDrift"] == 2
+    assert "LEFT JOIN" in athena.started[0]
+    drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=10)
+    assert sorted(drained.keys) == ["records/a.json", "records/b.json"]
+
+
+def test_reconcile_chains_when_the_time_budget_runs_out(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthenaResults(
+        ["SUCCEEDED"], [_page(["records/a.json"], "token-2", True)]
+    )
+    lambda_ = FakeLambda()
+
+    run_reconcile(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        depth=0,
+        time_remaining_ms=lambda: 1_000,
+    )
+
+    payload = json.loads(lambda_.invocations[0]["Payload"])
+    assert payload == {
+        "mode": "reconcile",
+        "depth": 1,
+        "query_execution_id": "qid-1",
+        "next_token": "token-2",
+    }
+
+
+def test_reconcile_continues_an_existing_result_without_a_new_query(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthenaResults([], [_page(["records/c.json"], None, False)])
+
+    run_reconcile(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        depth=1,
+        query_execution_id="qid-1",
+        next_token="token-2",
+    )
+
+    assert athena.started == []
+    assert athena.requested_tokens == ["token-2"]

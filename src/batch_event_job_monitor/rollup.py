@@ -17,7 +17,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from batch_event_job_monitor.rollup_schema import merge_sql
+from batch_event_job_monitor.rollup_schema import merge_sql, reconcile_sql
 
 logger = logging.getLogger(__name__)
 
@@ -611,5 +611,116 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
     if queue_has_messages(sqs_client=clients.sqs, queue_url=config.queue_url):
         _chain(config=config, clients=clients, mode="rollup", depth=depth + 1)
 
+    emit_metrics(namespace=config.metric_namespace, metrics=metrics)
+    return metrics
+
+
+# Leave enough of the invocation budget to chain before the timeout lands.
+RECONCILE_TIME_BUDGET_MS = 120_000
+
+_SEND_BATCH = 10
+
+
+def _enqueue_keys(*, sqs_client: Any, queue_url: str, keys: list[str]) -> None:
+    for start in range(0, len(keys), _SEND_BATCH):
+        batch = keys[start : start + _SEND_BATCH]
+        sqs_client.send_message_batch(
+            QueueUrl=queue_url,
+            Entries=[
+                {
+                    "Id": str(index),
+                    "MessageBody": json.dumps({"detail": {"object": {"key": key}}}),
+                }
+                for index, key in enumerate(batch)
+            ],
+        )
+
+
+def run_reconcile(
+    *,
+    config: RollupConfig,
+    clients: Clients,
+    depth: int,
+    query_execution_id: str | None = None,
+    next_token: str | None = None,
+    time_remaining_ms: Callable[[], int] = lambda: 900_000,
+) -> dict[str, int]:
+    """Enqueue every record key missing from or stale in the Iceberg table.
+
+    Convergent: each enqueued key gets merged, so the next pass matches
+    strictly fewer. Run against a cold table it is also the backfill.
+
+    Paging continues an existing result set rather than re-running the
+    query: when query_execution_id is passed in, this resumes
+    GetQueryResults from next_token instead of issuing a new query, which
+    keeps the snapshot consistent across chained hops.
+
+    Parameters
+    ----------
+    config : RollupConfig
+        Resolved configuration.
+    clients : Clients
+        Boto3 clients.
+    depth : int
+        This invocation's position in the self-invocation chain.
+    query_execution_id : str or None, optional
+        Existing Athena result to continue paging. A new query is started
+        when this is None.
+    next_token : str or None, optional
+        Result page token to resume from.
+    time_remaining_ms : Callable[[], int], optional
+        Milliseconds left in this invocation, from the Lambda context.
+
+    Returns
+    -------
+    dict[str, int]
+        Metrics emitted for this run.
+    """
+    if query_execution_id is None:
+        query_execution_id = run_query(
+            athena_client=clients.athena,
+            sql=reconcile_sql(
+                database=config.database,
+                iceberg_table=config.iceberg_table,
+                inventory_table=config.inventory_table,
+            ),
+            workgroup=config.workgroup,
+        )
+        skip_header = True
+    else:
+        skip_header = False
+
+    enqueued = 0
+    while True:
+        kwargs: dict[str, Any] = {"QueryExecutionId": query_execution_id}
+        if next_token is not None:
+            kwargs["NextToken"] = next_token
+        page = clients.athena.get_query_results(**kwargs)
+
+        rows = page["ResultSet"]["Rows"]
+        if skip_header:
+            rows = rows[1:]
+            skip_header = False
+
+        keys = [row["Data"][0]["VarCharValue"] for row in rows]
+        if keys:
+            _enqueue_keys(sqs_client=clients.sqs, queue_url=config.queue_url, keys=keys)
+            enqueued += len(keys)
+
+        next_token = page.get("NextToken")
+        if next_token is None:
+            break
+        if time_remaining_ms() < RECONCILE_TIME_BUDGET_MS:
+            _chain(
+                config=config,
+                clients=clients,
+                mode="reconcile",
+                depth=depth + 1,
+                query_execution_id=query_execution_id,
+                next_token=next_token,
+            )
+            break
+
+    metrics = {"ReconcileDrift": enqueued, "ChainDepth": depth}
     emit_metrics(namespace=config.metric_namespace, metrics=metrics)
     return metrics
