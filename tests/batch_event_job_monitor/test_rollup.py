@@ -26,6 +26,15 @@ from batch_event_job_monitor.rollup import (
 
 PARTITION_KEY_NAMES = ["job_type", "tile_id", "year_month"]
 
+_EXPECTED_METRIC_ENVELOPE = [
+    {"Name": "RolledUpRecords", "Unit": "Count"},
+    {"Name": "MergeDurationMs", "Unit": "Milliseconds"},
+    {"Name": "MissingSourceObjects", "Unit": "Count"},
+    {"Name": "MalformedRecords", "Unit": "Count"},
+    {"Name": "ChainDepth", "Unit": "Count"},
+    {"Name": "RollupFailures", "Unit": "Count"},
+]
+
 RUN_ID = "0f9d7a1c-2b3e-4c5d-8e9f-0a1b2c3d4e5f"
 
 SOURCE_KEY = (
@@ -368,6 +377,11 @@ def test_rollup_merges_and_deletes_messages_on_success(
     assert metrics["RolledUpRecords"] == 1
     assert "MERGE INTO" in athena.started[0]
     assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
+    attributes = sqs.get_queue_attributes(
+        QueueUrl=rollup_queue_url,
+        AttributeNames=["ApproximateNumberOfMessagesNotVisible"],
+    )["Attributes"]
+    assert int(attributes["ApproximateNumberOfMessagesNotVisible"]) == 0
     assert lambda_.invocations == []
 
 
@@ -406,6 +420,49 @@ def test_rollup_skips_the_merge_when_nothing_was_drained(
 
     assert metrics["RolledUpRecords"] == 0
     assert athena.started == []
+
+
+def test_rollup_deletes_messages_when_every_drained_object_is_missing(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    _send(sqs, rollup_queue_url, "records/job_type=a/gone.json")
+    athena = FakeAthena([])
+
+    metrics = run_rollup(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        depth=0,
+    )
+
+    assert athena.started == []
+    assert metrics["RolledUpRecords"] == 0
+    assert metrics["MissingSourceObjects"] == 1
+    assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
+    attributes = sqs.get_queue_attributes(
+        QueueUrl=rollup_queue_url,
+        AttributeNames=["ApproximateNumberOfMessagesNotVisible"],
+    )["Attributes"]
+    assert int(attributes["ApproximateNumberOfMessagesNotVisible"]) == 0
+
+
+def test_rollup_deletes_a_message_with_no_extractable_key(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    sqs.send_message(QueueUrl=rollup_queue_url, MessageBody=json.dumps({"detail": {}}))
+
+    metrics = run_rollup(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=FakeAthena([]), lambda_=FakeLambda()),
+        depth=0,
+    )
+
+    assert metrics["RolledUpRecords"] == 0
+    assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
+    attributes = sqs.get_queue_attributes(
+        QueueUrl=rollup_queue_url,
+        AttributeNames=["ApproximateNumberOfMessagesNotVisible"],
+    )["Attributes"]
+    assert int(attributes["ApproximateNumberOfMessagesNotVisible"]) == 0
 
 
 def test_rollup_chains_while_the_queue_is_not_empty(
@@ -477,6 +534,9 @@ def test_rollup_emits_merge_duration_and_zero_failures_on_success(
     emitted = json.loads(capsys.readouterr().out.strip())
     assert emitted["RollupFailures"] == 0
     assert emitted["MergeDurationMs"] >= 0
+    cloudwatch_metrics = emitted["_aws"]["CloudWatchMetrics"][0]
+    assert cloudwatch_metrics["Namespace"] == "BatchEventJobMonitor"
+    assert cloudwatch_metrics["Metrics"] == _EXPECTED_METRIC_ENVELOPE
 
 
 def test_rollup_counts_a_failure_and_still_emits_metrics_on_a_failed_merge(
@@ -504,3 +564,6 @@ def test_rollup_counts_a_failure_and_still_emits_metrics_on_a_failed_merge(
     assert emitted["RollupFailures"] == 1
     assert emitted["MergeDurationMs"] >= 0
     assert emitted["RolledUpRecords"] == 0
+    cloudwatch_metrics = emitted["_aws"]["CloudWatchMetrics"][0]
+    assert cloudwatch_metrics["Namespace"] == "BatchEventJobMonitor"
+    assert cloudwatch_metrics["Metrics"] == _EXPECTED_METRIC_ENVELOPE

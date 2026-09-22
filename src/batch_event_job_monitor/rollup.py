@@ -455,6 +455,10 @@ class Clients:
     lambda_: Any
 
 
+_METRIC_UNITS = {"MergeDurationMs": "Milliseconds"}
+_DEFAULT_METRIC_UNIT = "Count"
+
+
 def emit_metrics(*, namespace: str, metrics: dict[str, int]) -> None:
     """Print one Embedded Metric Format record covering every metric.
 
@@ -472,7 +476,13 @@ def emit_metrics(*, namespace: str, metrics: dict[str, int]) -> None:
                 {
                     "Namespace": namespace,
                     "Dimensions": [[]],
-                    "Metrics": [{"Name": name} for name in metrics],
+                    "Metrics": [
+                        {
+                            "Name": name,
+                            "Unit": _METRIC_UNITS.get(name, _DEFAULT_METRIC_UNIT),
+                        }
+                        for name in metrics
+                    ],
                 }
             ],
         },
@@ -550,10 +560,6 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
         "ChainDepth": depth,
         "RollupFailures": 0,
     }
-
-    if not drained.keys:
-        emit_metrics(namespace=config.metric_namespace, metrics=metrics)
-        return metrics
 
     fetched = fetch_rows(
         s3_client=clients.s3,
