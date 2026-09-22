@@ -8,16 +8,21 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from botocore.exceptions import ClientError
 
+from batch_event_job_monitor.rollup_schema import merge_sql
+
 logger = logging.getLogger(__name__)
 
 _RECEIVE_BATCH = 10
+_DELETE_BATCH = 10
 
 _MISSING_OBJECT_CODES = ("NoSuchKey", "404", "NotFound")
 
@@ -134,9 +139,13 @@ def drain_keys(*, sqs_client: Any, queue_url: str, max_keys: int) -> DrainedKeys
     seen: set[str] = set()
 
     while len(seen) < max_keys:
+        # Any message SQS returns goes invisible immediately, whether or not
+        # this loop uses it. Capping the request at the remaining need keeps
+        # every returned message on a path to either a captured receipt
+        # handle or staying visible for the queue-depth check that follows.
         response = sqs_client.receive_message(
             QueueUrl=queue_url,
-            MaxNumberOfMessages=_RECEIVE_BATCH,
+            MaxNumberOfMessages=min(_RECEIVE_BATCH, max_keys - len(seen)),
             WaitTimeSeconds=1,
         )
         messages = response.get("Messages", [])
@@ -373,3 +382,228 @@ def run_query(
             reason = status.get("StateChangeReason", state)
             raise AthenaQueryError(f"Athena query {query_id} {state}: {reason}")
         sleep(poll_seconds)
+
+
+@dataclass(frozen=True)
+class RollupConfig:
+    """Everything the rollup and reconcile modes read from the environment.
+
+    Attributes
+    ----------
+    bucket : str
+        Processing bucket holding records/, staging/, and the Iceberg data.
+    queue_url : str
+        Rollup queue URL.
+    staging_prefix : str
+        Key prefix for staging objects, with a trailing slash.
+    database : str
+        Glue database holding every table below.
+    iceberg_table : str
+        Rolled-up Iceberg table name.
+    staging_table : str
+        NDJSON staging table name.
+    inventory_table : str
+        S3-inventory table over records/.
+    workgroup : str
+        Athena workgroup supplying the query result location.
+    partition_key_names : list[str]
+        Ordered partition key names, job_type first.
+    max_keys : int
+        Per-run cap on distinct keys.
+    max_depth : int
+        Maximum self-invocation chain length.
+    function_name : str
+        This function's own name, used for self-invocation.
+    metric_namespace : str
+        CloudWatch namespace for the EMF records.
+    """
+
+    bucket: str
+    queue_url: str
+    staging_prefix: str
+    database: str
+    iceberg_table: str
+    staging_table: str
+    inventory_table: str
+    workgroup: str
+    partition_key_names: list[str]
+    max_keys: int
+    max_depth: int
+    function_name: str
+    metric_namespace: str
+
+
+@dataclass
+class Clients:
+    """Boto3 clients the rollup needs, grouped so tests can substitute fakes.
+
+    Attributes
+    ----------
+    s3 : Any
+        S3 client.
+    sqs : Any
+        SQS client.
+    athena : Any
+        Athena client.
+    lambda_ : Any
+        Lambda client, used only for self-invocation.
+    """
+
+    s3: Any
+    sqs: Any
+    athena: Any
+    lambda_: Any
+
+
+def emit_metrics(*, namespace: str, metrics: dict[str, int]) -> None:
+    """Print one Embedded Metric Format record covering every metric.
+
+    Parameters
+    ----------
+    namespace : str
+        CloudWatch namespace.
+    metrics : dict[str, int]
+        Metric name to value.
+    """
+    record: dict[str, Any] = {
+        "_aws": {
+            "Timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": namespace,
+                    "Dimensions": [[]],
+                    "Metrics": [{"Name": name} for name in metrics],
+                }
+            ],
+        },
+        **metrics,
+    }
+    print(json.dumps(record))
+
+
+def _delete_messages(*, sqs_client: Any, queue_url: str, handles: list[str]) -> None:
+    for start in range(0, len(handles), _DELETE_BATCH):
+        batch = handles[start : start + _DELETE_BATCH]
+        sqs_client.delete_message_batch(
+            QueueUrl=queue_url,
+            Entries=[
+                {"Id": str(index), "ReceiptHandle": handle}
+                for index, handle in enumerate(batch)
+            ],
+        )
+
+
+def _chain(
+    *, config: RollupConfig, clients: Clients, mode: str, depth: int, **extra: Any
+) -> bool:
+    if depth >= config.max_depth:
+        logger.warning("Chain depth %d reached the maximum; stopping", depth)
+        return False
+    clients.lambda_.invoke(
+        FunctionName=config.function_name,
+        InvocationType="Event",
+        Payload=json.dumps({"mode": mode, "depth": depth, **extra}),
+    )
+    return True
+
+
+def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[str, int]:
+    """Drain the queue, merge one batch, and chain if work remains.
+
+    Messages are deleted only after the merge succeeds, so an invocation that
+    dies part-way leaves them to reappear. Every operation is idempotent on
+    the natural key, so replay is safe. Metrics are emitted on both the
+    success and failure paths, since a failed merge is itself signal.
+
+    Parameters
+    ----------
+    config : RollupConfig
+        Resolved configuration.
+    clients : Clients
+        Boto3 clients.
+    depth : int
+        This invocation's position in the self-invocation chain.
+
+    Returns
+    -------
+    dict[str, int]
+        Metrics emitted for this run.
+
+    Raises
+    ------
+    AthenaQueryError
+        If the merge reaches a terminal failure state. Raised after metrics
+        for this run are emitted, and before any SQS message or the staging
+        object is deleted.
+    """
+    drained = drain_keys(
+        sqs_client=clients.sqs,
+        queue_url=config.queue_url,
+        max_keys=config.max_keys,
+    )
+
+    metrics: dict[str, int] = {
+        "RolledUpRecords": 0,
+        "MergeDurationMs": 0,
+        "MissingSourceObjects": 0,
+        "MalformedRecords": 0,
+        "ChainDepth": depth,
+        "RollupFailures": 0,
+    }
+
+    if not drained.keys:
+        emit_metrics(namespace=config.metric_namespace, metrics=metrics)
+        return metrics
+
+    fetched = fetch_rows(
+        s3_client=clients.s3,
+        bucket=config.bucket,
+        keys=drained.keys,
+        partition_key_names=config.partition_key_names,
+    )
+    metrics["MissingSourceObjects"] = fetched.missing
+    metrics["MalformedRecords"] = fetched.malformed
+
+    if fetched.rows:
+        run_id = str(uuid.uuid4())
+        staging_key = write_staging_object(
+            s3_client=clients.s3,
+            bucket=config.bucket,
+            staging_prefix=config.staging_prefix,
+            run_id=run_id,
+            rows=fetched.rows,
+        )
+        sql = merge_sql(
+            database=config.database,
+            iceberg_table=config.iceberg_table,
+            staging_table=config.staging_table,
+            run_id=run_id,
+            partition_key_names=config.partition_key_names,
+        )
+        merge_start = time.monotonic()
+        try:
+            run_query(
+                athena_client=clients.athena,
+                sql=sql,
+                workgroup=config.workgroup,
+            )
+        except AthenaQueryError:
+            metrics["MergeDurationMs"] = int((time.monotonic() - merge_start) * 1000)
+            metrics["RollupFailures"] = 1
+            emit_metrics(namespace=config.metric_namespace, metrics=metrics)
+            raise
+        metrics["MergeDurationMs"] = int((time.monotonic() - merge_start) * 1000)
+        clients.s3.delete_object(Bucket=config.bucket, Key=staging_key)
+        metrics["RolledUpRecords"] = len(fetched.rows)
+
+    _delete_messages(
+        sqs_client=clients.sqs,
+        queue_url=config.queue_url,
+        handles=drained.receipt_handles,
+    )
+
+    if queue_has_messages(sqs_client=clients.sqs, queue_url=config.queue_url):
+        _chain(config=config, clients=clients, mode="rollup", depth=depth + 1)
+
+    emit_metrics(namespace=config.metric_namespace, metrics=metrics)
+    return metrics

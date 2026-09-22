@@ -12,12 +12,15 @@ from mypy_boto3_sqs import SQSClient
 
 from batch_event_job_monitor.rollup import (
     AthenaQueryError,
+    Clients,
     MalformedRecord,
+    RollupConfig,
     drain_keys,
     fetch_rows,
     queue_has_messages,
     record_to_row,
     run_query,
+    run_rollup,
     write_staging_object,
 )
 
@@ -315,3 +318,189 @@ def test_run_query_raises_on_a_terminal_failure(state: str) -> None:
             sleep=sleep_calls.append,
         )
     assert sleep_calls == []
+
+
+class FakeLambda:
+    """Minimal Lambda client recording the invocations it was asked to make."""
+
+    def __init__(self) -> None:
+        self.invocations: list[dict[str, Any]] = []
+
+    def invoke(self, **kwargs: Any) -> dict[str, int]:
+        self.invocations.append(kwargs)
+        return {"StatusCode": 202}
+
+
+def _config(bucket: str, queue_url: str, **overrides: Any) -> RollupConfig:
+    defaults: dict[str, Any] = {
+        "bucket": bucket,
+        "queue_url": queue_url,
+        "staging_prefix": "staging/",
+        "database": "test_db",
+        "iceberg_table": "records_iceberg",
+        "staging_table": "records_staging",
+        "inventory_table": "records_inventory",
+        "workgroup": "wg",
+        "partition_key_names": PARTITION_KEY_NAMES,
+        "max_keys": 100,
+        "max_depth": 3,
+        "function_name": "rollup-fn",
+        "metric_namespace": "BatchEventJobMonitor",
+    }
+    defaults.update(overrides)
+    return RollupConfig(**defaults)
+
+
+def test_rollup_merges_and_deletes_messages_on_success(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    _put_record(s3, bucket, SOURCE_KEY, _body())
+    _send(sqs, rollup_queue_url, SOURCE_KEY)
+    athena = FakeAthena(["SUCCEEDED"])
+    lambda_ = FakeLambda()
+
+    metrics = run_rollup(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        depth=0,
+    )
+
+    assert metrics["RolledUpRecords"] == 1
+    assert "MERGE INTO" in athena.started[0]
+    assert not queue_has_messages(sqs_client=sqs, queue_url=rollup_queue_url)
+    assert lambda_.invocations == []
+
+
+def test_rollup_retains_messages_when_the_merge_fails(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    _put_record(s3, bucket, SOURCE_KEY, _body())
+    _send(sqs, rollup_queue_url, SOURCE_KEY)
+
+    with pytest.raises(AthenaQueryError):
+        run_rollup(
+            config=_config(bucket, rollup_queue_url),
+            clients=Clients(
+                s3=s3, sqs=sqs, athena=FakeAthena(["FAILED"]), lambda_=FakeLambda()
+            ),
+            depth=0,
+        )
+
+    attributes = sqs.get_queue_attributes(
+        QueueUrl=rollup_queue_url,
+        AttributeNames=["ApproximateNumberOfMessagesNotVisible"],
+    )["Attributes"]
+    assert int(attributes["ApproximateNumberOfMessagesNotVisible"]) == 1
+
+
+def test_rollup_skips_the_merge_when_nothing_was_drained(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthena([])
+
+    metrics = run_rollup(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        depth=0,
+    )
+
+    assert metrics["RolledUpRecords"] == 0
+    assert athena.started == []
+
+
+def test_rollup_chains_while_the_queue_is_not_empty(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    for index in range(3):
+        key = (
+            "records/job_type=monthly-composite/tile_id=12TVK/"
+            f"year_month=2024-06/input_entity_id=e{index}/001.json"
+        )
+        body = _body()
+        body["input_entity_id"] = f"e{index}"
+        _put_record(s3, bucket, key, body)
+        _send(sqs, rollup_queue_url, key)
+
+    lambda_ = FakeLambda()
+    run_rollup(
+        config=_config(bucket, rollup_queue_url, max_keys=1),
+        clients=Clients(
+            s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=lambda_
+        ),
+        depth=0,
+    )
+
+    assert len(lambda_.invocations) == 1
+    payload = json.loads(lambda_.invocations[0]["Payload"])
+    assert payload == {"mode": "rollup", "depth": 1}
+    assert lambda_.invocations[0]["InvocationType"] == "Event"
+
+
+def test_rollup_does_not_chain_past_max_depth(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    for index in range(3):
+        _send(sqs, rollup_queue_url, f"records/job_type=a/{index:03d}.json")
+
+    lambda_ = FakeLambda()
+    run_rollup(
+        config=_config(bucket, rollup_queue_url, max_keys=1, max_depth=1),
+        clients=Clients(
+            s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=lambda_
+        ),
+        depth=0,
+    )
+
+    assert lambda_.invocations == []
+
+
+def test_rollup_emits_merge_duration_and_zero_failures_on_success(
+    s3: S3Client,
+    bucket: str,
+    sqs: SQSClient,
+    rollup_queue_url: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _put_record(s3, bucket, SOURCE_KEY, _body())
+    _send(sqs, rollup_queue_url, SOURCE_KEY)
+
+    metrics = run_rollup(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(
+            s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=FakeLambda()
+        ),
+        depth=0,
+    )
+
+    assert metrics["RollupFailures"] == 0
+    assert metrics["MergeDurationMs"] >= 0
+    emitted = json.loads(capsys.readouterr().out.strip())
+    assert emitted["RollupFailures"] == 0
+    assert emitted["MergeDurationMs"] >= 0
+
+
+def test_rollup_counts_a_failure_and_still_emits_metrics_on_a_failed_merge(
+    s3: S3Client,
+    bucket: str,
+    sqs: SQSClient,
+    rollup_queue_url: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _put_record(s3, bucket, SOURCE_KEY, _body())
+    _send(sqs, rollup_queue_url, SOURCE_KEY)
+
+    with pytest.raises(AthenaQueryError):
+        run_rollup(
+            config=_config(bucket, rollup_queue_url),
+            clients=Clients(
+                s3=s3, sqs=sqs, athena=FakeAthena(["FAILED"]), lambda_=FakeLambda()
+            ),
+            depth=0,
+        )
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    emitted = json.loads(lines[0])
+    assert emitted["RollupFailures"] == 1
+    assert emitted["MergeDurationMs"] >= 0
+    assert emitted["RolledUpRecords"] == 0
