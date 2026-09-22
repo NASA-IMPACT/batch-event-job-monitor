@@ -7,6 +7,8 @@ PartitionKeySpec objects, keeping this module free of any CDK import.
 
 from __future__ import annotations
 
+import re
+
 EVENTS_TYPE = (
     "array<struct<state:string,timestamp:string,batch_job_id:string,exit_code:int>>"
 )
@@ -129,4 +131,128 @@ def create_table_sql(
         f"'format'='parquet', "
         f"'format-version'='2'"
         f")"
+    )
+
+
+_RUN_ID_PATTERN = re.compile(r"\A[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
+
+
+class InvalidRunId(ValueError):
+    """Raised when a run id is not a lowercase hyphenated UUID."""
+
+
+def _staging_expression(name: str) -> str:
+    if name == "last_event_timestamp":
+        return 'from_iso8601_timestamp(s."last_event_timestamp")'
+    return f's."{name}"'
+
+
+def merge_sql(
+    *,
+    database: str,
+    iceberg_table: str,
+    staging_table: str,
+    run_id: str,
+    partition_key_names: list[str],
+) -> str:
+    """Build the MERGE upserting one staging run into the Iceberg table.
+
+    Parameters
+    ----------
+    database : str
+        Glue database holding both tables.
+    iceberg_table : str
+        Iceberg table name (the MERGE target).
+    staging_table : str
+        NDJSON staging table name (the MERGE source).
+    run_id : str
+        Staging partition value for this run. Must be a lowercase hyphenated
+        UUID.
+    partition_key_names : list[str]
+        Ordered partition key names, job_type first.
+
+    Returns
+    -------
+    str
+        A MERGE INTO statement.
+
+    Raises
+    ------
+    InvalidRunId
+        If run_id is not a lowercase hyphenated UUID.
+    """
+    if not _RUN_ID_PATTERN.match(run_id):
+        raise InvalidRunId(f"run_id is not a lowercase hyphenated UUID: {run_id!r}")
+
+    keys = key_columns(partition_key_names)
+    on_clause = "\n   AND ".join(f't."{column}" = s."{column}"' for column in keys)
+
+    updatable = [
+        name
+        for name, _ in iceberg_columns(partition_key_names)
+        if name not in keys and name != "rolled_up_at"
+    ]
+    set_clause = ",\n               ".join(
+        f'"{name}" = {_staging_expression(name)}' for name in updatable
+    )
+
+    insert_names = [name for name, _ in iceberg_columns(partition_key_names)]
+    insert_columns = ", ".join(f'"{name}"' for name in insert_names)
+    insert_values = ", ".join(
+        "current_timestamp" if name == "rolled_up_at" else _staging_expression(name)
+        for name in insert_names
+    )
+
+    return (
+        f'MERGE INTO "{database}"."{iceberg_table}" t\n'
+        f'USING (SELECT * FROM "{database}"."{staging_table}" '
+        f"WHERE run_id = '{run_id}') s\n"
+        f"    ON {on_clause}\n"
+        f'WHEN MATCHED AND from_iso8601_timestamp(s."last_event_timestamp") '
+        f'>= t."last_event_timestamp" THEN\n'
+        f"    UPDATE SET {set_clause},\n"
+        f'               "rolled_up_at" = current_timestamp\n'
+        f"WHEN NOT MATCHED THEN\n"
+        f"    INSERT ({insert_columns})\n"
+        f"    VALUES ({insert_values})"
+    )
+
+
+def reconcile_sql(
+    *,
+    database: str,
+    iceberg_table: str,
+    inventory_table: str,
+) -> str:
+    """Build the query selecting keys missing from or stale in the table.
+
+    Compares the newest inventory report against the rolled-up table. An
+    object whose last_modified_date is later than the row's rolled_up_at was
+    rewritten after it was merged. Clock skew can make that comparison fire
+    spuriously; a spurious re-merge is idempotent.
+
+    Parameters
+    ----------
+    database : str
+        Glue database holding both tables.
+    iceberg_table : str
+        Iceberg table name.
+    inventory_table : str
+        S3-inventory table over the records/ prefix.
+
+    Returns
+    -------
+    str
+        A SELECT returning one source_key column.
+    """
+    return (
+        f'SELECT inv."key" AS source_key\n'
+        f'FROM "{database}"."{inventory_table}" inv\n'
+        f'LEFT JOIN "{database}"."{iceberg_table}" t\n'
+        f'    ON t."source_key" = inv."key"\n'
+        f'WHERE inv."dt" = (SELECT max("dt") FROM "{database}"."{inventory_table}")\n'
+        f'  AND inv."is_latest"\n'
+        f'  AND NOT inv."is_delete_marker"\n'
+        f'  AND (t."source_key" IS NULL '
+        f'OR inv."last_modified_date" > t."rolled_up_at")'
     )
