@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import json
 from typing import Any
 
@@ -255,15 +256,45 @@ def test_rollup_function_can_read_staging_for_the_athena_merge() -> None:
     assert _statement_touching(statements, "s3:GetObject", "staging/*") is not None
 
 
-def test_reconcile_function_can_read_the_s3_inventory_location() -> None:
+def _inventory_grant_resource() -> str:
+    """Return the reconcile Lambda's granted S3 Inventory resource ARN.
+
+    Returns
+    -------
+    str
+        The single resource ARN (an IAM wildcard pattern) of the
+        statement granting s3:GetObject under the S3 Inventory prefix.
+    """
+    statements = _reconcile_policy_statements()
+    statement = _statement_touching(
+        statements, "s3:GetObject", "inv/test-bucket/records"
+    )
+    assert statement is not None
+    resource = statement["Resource"]
+    assert isinstance(resource, str)
+    return resource
+
+
+def test_reconcile_function_can_read_the_s3_inventory_manifest() -> None:
     # reconcile_sql anti-joins the inventory table, whose underlying data
     # is a separate S3 Inventory prefix, never covered by the Iceberg
     # data/results grants.
-    statements = _reconcile_policy_statements()
-    assert (
-        _statement_touching(statements, "s3:GetObject", "inv/test-bucket/records/hive")
-        is not None
+    resource = _inventory_grant_resource()
+    manifest_key = (
+        "arn:aws:s3:::test-bucket/inv/test-bucket/records/"
+        "hive/dt=2026-01-01-01-00/symlink.txt"
     )
+    assert fnmatch.fnmatch(manifest_key, resource)
+
+
+def test_reconcile_function_can_read_the_s3_inventory_data_files() -> None:
+    # The symlink.txt manifests under hive/ point at Parquet files one
+    # level up, under a sibling data/ prefix -- a grant scoped to hive/*
+    # alone reads the manifest and then gets Access Denied on every file
+    # it names. This is the assertion round 1 of review was missing.
+    resource = _inventory_grant_resource()
+    data_key = "arn:aws:s3:::test-bucket/inv/test-bucket/records/data/0001.parquet"
+    assert fnmatch.fnmatch(data_key, resource)
 
 
 def test_reconcile_function_has_no_write_access_to_iceberg_data() -> None:

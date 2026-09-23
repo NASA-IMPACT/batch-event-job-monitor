@@ -34,6 +34,7 @@ RECORDS_PREFIX = "records/"
 _ROLLUP_TIMEOUT = Duration.minutes(15)
 _DLQ_MAX_RECEIVE_COUNT = 5
 _STAGING_EXPIRATION = Duration.days(7)
+_INVENTORY_MANIFEST_SUFFIX = "hive/"
 
 
 def _object_arn_from_s3_uri(s3_uri: str) -> str:
@@ -53,6 +54,49 @@ def _object_arn_from_s3_uri(s3_uri: str) -> str:
     without_scheme = s3_uri.removeprefix("s3://")
     bucket, _, key_prefix = without_scheme.partition("/")
     return f"arn:aws:s3:::{bucket}/{key_prefix}*"
+
+
+def _inventory_data_resource(inventory_location_s3path: str) -> str:
+    """Build the object ARN covering an S3 Inventory's manifest and data.
+
+    ``inventory_location_s3path`` (e.g. from
+    ``ProcessingBucket.inventory_location``) names the ``hive/`` symlink-
+    manifest prefix specifically -- ``s3://bucket/prefix/{inventory-id}/
+    hive/``. The symlink.txt files under that prefix point at Parquet
+    files one level up, under a sibling ``data/`` prefix
+    (``.../{inventory-id}/data/*.parquet``), so a grant scoped to
+    ``hive/*`` alone reads the manifest fine and then gets Access Denied
+    reading the data it names. Stripping the trailing ``hive/`` segment
+    off the given URI (rather than reconstructing the parent path from
+    its parts) keeps this derived from the one URI that actually crosses
+    the interface, instead of a second, independently-assembled path that
+    could drift from it.
+
+    Parameters
+    ----------
+    inventory_location_s3path : str
+        s3:// URI of an S3 Inventory's Hive symlink-manifest prefix,
+        ending in ``hive/``.
+
+    Returns
+    -------
+    str
+        Object ARN wildcard covering both the ``hive/`` manifests and the
+        sibling ``data/`` Parquet files.
+
+    Raises
+    ------
+    ValueError
+        If ``inventory_location_s3path`` does not end with the expected
+        ``hive/`` manifest suffix.
+    """
+    if not inventory_location_s3path.endswith(_INVENTORY_MANIFEST_SUFFIX):
+        raise ValueError(
+            "expected an S3 Inventory location ending in "
+            f"{_INVENTORY_MANIFEST_SUFFIX!r}, got {inventory_location_s3path!r}"
+        )
+    parent = inventory_location_s3path[: -len(_INVENTORY_MANIFEST_SUFFIX)]
+    return _object_arn_from_s3_uri(parent)
 
 
 class RecordsRollupFunction(Construct):
@@ -197,7 +241,7 @@ class RecordsRollupFunction(Construct):
             bucket_arn,
             f"{bucket_arn}/{ATHENA_RESULTS_PREFIX}*",
         ]
-        inventory_resource = _object_arn_from_s3_uri(
+        inventory_resource = _inventory_data_resource(
             iceberg_table.inventory_location_s3path
         )
 
@@ -409,8 +453,9 @@ class RecordsRollupFunction(Construct):
         athena_results_resources : list[str]
             Bucket and object ARNs covering the Athena results location.
         inventory_resource : str
-            Object ARN covering the S3 Inventory location the inventory
-            table's reconcile_sql anti-join reads.
+            Object ARN covering both the S3 Inventory's hive/ manifest
+            prefix and its sibling data/ prefix -- see
+            _inventory_data_resource.
         """
         function.add_to_role_policy(
             iam.PolicyStatement(
