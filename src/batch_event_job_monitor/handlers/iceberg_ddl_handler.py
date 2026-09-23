@@ -10,11 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 from batch_event_job_monitor.rollup import run_query
 from batch_event_job_monitor.rollup_schema import create_table_sql, iceberg_columns
 
 _athena_client = boto3.client("athena")
+_glue_client = boto3.client("glue")
 
 
 class IncompatibleSchemaChange(RuntimeError):
@@ -82,6 +84,63 @@ def added_column_sql(
     ]
 
 
+def _deployed_columns(
+    *, glue_client: Any, database: str, table: str
+) -> list[tuple[str, str]] | None:
+    """Read the live Glue Data Catalog schema for an existing table.
+
+    The code currently running is not a reliable source for what a table
+    was declared with at the time of its last deploy: two calls to
+    iceberg_columns always agree on every column but the partition keys,
+    because the fixed body columns come from constants in whichever code
+    happens to be running both calls. Only the catalog records what a
+    previous deploy actually created.
+
+    Parameters
+    ----------
+    glue_client : Any
+        Boto3 Glue client.
+    database : str
+        Glue database name.
+    table : str
+        Table name.
+
+    Returns
+    -------
+    list[tuple[str, str]] or None
+        (name, type) pairs from the table's StorageDescriptor, in catalog
+        order, or None if the table is not yet in the catalog.
+    """
+    try:
+        response = glue_client.get_table(DatabaseName=database, Name=table)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "EntityNotFoundException":
+            return None
+        raise
+    columns = response["Table"]["StorageDescriptor"]["Columns"]
+    return [(column["Name"], column["Type"]) for column in columns]
+
+
+def _run_create_table(
+    *,
+    database: str,
+    table: str,
+    location: str,
+    partition_key_names: list[str],
+    workgroup: str,
+) -> None:
+    run_query(
+        athena_client=_athena_client,
+        sql=create_table_sql(
+            database=database,
+            table=table,
+            location=location,
+            partition_key_names=partition_key_names,
+        ),
+        workgroup=workgroup,
+    )
+
+
 def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
     """Create, update, or drop the Iceberg records table.
 
@@ -96,11 +155,18 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
     -------
     dict[str, str]
         The physical resource id, stable across updates.
+
+    Raises
+    ------
+    IncompatibleSchemaChange
+        If an Update would remove or retype a column the live table already
+        has.
     """
     properties = event["ResourceProperties"]
     database = properties["Database"]
     table = properties["Table"]
     workgroup = properties["Workgroup"]
+    location = properties["Location"]
     partition_key_names = properties["PartitionKeyNames"].split(",")
     physical_id = f"{database}.{table}"
 
@@ -116,8 +182,18 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
         return {"PhysicalResourceId": physical_id}
 
     if request_type == "Update":
-        old_properties = event["OldResourceProperties"]
-        old_columns = iceberg_columns(old_properties["PartitionKeyNames"].split(","))
+        old_columns = _deployed_columns(
+            glue_client=_glue_client, database=database, table=table
+        )
+        if old_columns is None:
+            _run_create_table(
+                database=database,
+                table=table,
+                location=location,
+                partition_key_names=partition_key_names,
+                workgroup=workgroup,
+            )
+            return {"PhysicalResourceId": physical_id}
         for statement in added_column_sql(
             database=database,
             table=table,
@@ -127,14 +203,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
             run_query(athena_client=_athena_client, sql=statement, workgroup=workgroup)
         return {"PhysicalResourceId": physical_id}
 
-    run_query(
-        athena_client=_athena_client,
-        sql=create_table_sql(
-            database=database,
-            table=table,
-            location=properties["Location"],
-            partition_key_names=partition_key_names,
-        ),
+    _run_create_table(
+        database=database,
+        table=table,
+        location=location,
+        partition_key_names=partition_key_names,
         workgroup=workgroup,
     )
     return {"PhysicalResourceId": physical_id}
