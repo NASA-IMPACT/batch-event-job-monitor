@@ -326,6 +326,9 @@ results stored under `s3://{processing_bucket_name}/athena-results/` and exposes
 an existing workgroup name to skip creating one; in that case the workgroup's query-results location is yours to manage.
 Both `workgroup_name` (the resolved name) and `workgroup` (the created workgroup or None) are exposed as attributes.
 
+**Removal policy scope:** The `removal_policy` parameter governs only the Iceberg table. The staging and inventory
+tables are always created with `RemovalPolicy.DESTROY`, matching the other inventory-backed tables in this package.
+
 ```python
 import datetime as dt
 
@@ -363,9 +366,13 @@ weekly to reconcile drift from the S3 Inventory (the backfill function -- invoke
 `ReconcileDrift` metric reaches 0).
 
 Both Lambdas are created from a single handler asset with different payloads (`"mode": "rollup"` or
-`"mode": "reconcile"`). They share one Athena workgroup (defaulting to `iceberg_table.workgroup_name`), one reserved
-concurrency of 1, recursive self-invocation enabled, and zero async retries to enable long self-invoking chains for
-draining the queue or backfilling changes.
+`"mode": "reconcile"`). They share one Athena workgroup (defaulting to `iceberg_table.workgroup_name`).
+
+**Recursive self-invocation:** AWS Lambda defaults to terminating self-invoking chains at 16 invocations as a safety
+limit. This construct opts out via `recursive_loop=RecursiveLoop.ALLOW` to support draining long queues and backfilling
+large drift. Four compensating controls make this opt-out defensible: (1) reserved concurrency of 1 ensures the chain
+cannot fan out; (2) async retries are set to 0 so failures stop the chain rather than retrying; (3) max-depth counter in
+the handler prevents infinite loops; (4) `ChainDepth` metric reports depth at each step to alarm on runaway chains.
 
 **Freshness for consumers:** Query `SELECT max(rolled_up_at) FROM {database}.{iceberg_table}` to get the timestamp of
 the most recent rolled-up record.
