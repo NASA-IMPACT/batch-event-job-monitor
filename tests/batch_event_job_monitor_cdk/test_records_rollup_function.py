@@ -17,6 +17,7 @@ PARTITION_KEYS = [
     PartitionKeySpec("job_type", "string", "enum", enum_values=("monthly-composite",)),
     PartitionKeySpec("tile_id", "string", "injected"),
 ]
+INVENTORY_LOCATION = "s3://test-bucket/inv/test-bucket/records/hive/"
 
 
 def _contains_fragment(value: Any, fragment: str) -> bool:
@@ -80,7 +81,7 @@ def _construct() -> tuple[RecordsRollupFunction, Template]:
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
-        records_inventory_location_s3path="s3://test-bucket/inv/test-bucket/records/hive/",
+        records_inventory_location_s3path=INVENTORY_LOCATION,
         inventory_datetime_start=dt.datetime(2026, 1, 1, 1, 0),
         partition_keys=PARTITION_KEYS,
     )
@@ -98,8 +99,9 @@ def _construct() -> tuple[RecordsRollupFunction, Template]:
 def test_both_functions_allow_recursive_invocation() -> None:
     template = _template()
     # rollup + reconcile + the DDL handler + the custom-resource provider's
-    # own framework function.
-    template.resource_count_is("AWS::Lambda::Function", 4)
+    # own framework function + the BucketNotificationsHandler custom
+    # resource enable_event_bridge_notification() adds.
+    template.resource_count_is("AWS::Lambda::Function", 5)
     functions = template.find_resources(
         "AWS::Lambda::Function",
         {"Properties": {"RecursiveLoop": "Allow"}},
@@ -207,32 +209,65 @@ def test_both_functions_carry_every_rollup_handler_env_var() -> None:
     assert checked == 2
 
 
-def test_rollup_function_can_read_records_and_write_staging() -> None:
+def _rollup_policy_statements() -> list[dict[str, Any]]:
     template = _template()
     policies = template.find_resources("AWS::IAM::Policy")
     rollup_policy = next(
         resource
         for logical_id, resource in policies.items()
-        if "RollupFunction" in logical_id
+        if "RollupFunction" in logical_id and "SelfInvoke" not in logical_id
     )
-    statements = rollup_policy["Properties"]["PolicyDocument"]["Statement"]
+    statements: list[dict[str, Any]] = rollup_policy["Properties"]["PolicyDocument"][
+        "Statement"
+    ]
+    return statements
+
+
+def _reconcile_policy_statements() -> list[dict[str, Any]]:
+    template = _template()
+    policies = template.find_resources("AWS::IAM::Policy")
+    reconcile_policy = next(
+        resource
+        for logical_id, resource in policies.items()
+        if "ReconcileFunction" in logical_id and "SelfInvoke" not in logical_id
+    )
+    statements: list[dict[str, Any]] = reconcile_policy["Properties"]["PolicyDocument"][
+        "Statement"
+    ]
+    return statements
+
+
+def test_rollup_function_can_read_records_and_write_staging() -> None:
+    statements = _rollup_policy_statements()
     assert _statement_touching(statements, "s3:GetObject", "records/*") is not None
     put_staging = _statement_touching(statements, "s3:PutObject", "staging/*")
     assert put_staging is not None
     actions = put_staging["Action"]
-    assert "s3:DeleteObject" in (actions if isinstance(actions, list) else [actions])
+    actions = actions if isinstance(actions, list) else [actions]
+    assert "s3:DeleteObject" in actions
+
+
+def test_rollup_function_can_read_staging_for_the_athena_merge() -> None:
+    # The MERGE's USING source is the staging Glue table, and Athena reads
+    # a table's underlying data as the calling identity -- without
+    # GetObject here every MERGE fails with Access Denied.
+    statements = _rollup_policy_statements()
+    assert _statement_touching(statements, "s3:GetObject", "staging/*") is not None
+
+
+def test_reconcile_function_can_read_the_s3_inventory_location() -> None:
+    # reconcile_sql anti-joins the inventory table, whose underlying data
+    # is a separate S3 Inventory prefix, never covered by the Iceberg
+    # data/results grants.
+    statements = _reconcile_policy_statements()
+    assert (
+        _statement_touching(statements, "s3:GetObject", "inv/test-bucket/records/hive")
+        is not None
+    )
 
 
 def test_reconcile_function_has_no_write_access_to_iceberg_data() -> None:
-    template = _template()
-    policies = template.find_resources("AWS::IAM::Policy")
-    reconcile_policy = None
-    for logical_id, resource in policies.items():
-        if "ReconcileFunction" in logical_id:
-            reconcile_policy = resource
-            break
-    assert reconcile_policy is not None
-    statements = reconcile_policy["Properties"]["PolicyDocument"]["Statement"]
+    statements = _reconcile_policy_statements()
     for statement in statements:
         actions = statement["Action"]
         actions = actions if isinstance(actions, list) else [actions]
@@ -258,13 +293,82 @@ def test_glue_and_athena_grants_are_arn_scoped_not_wildcard() -> None:
                 assert "*" not in resources
 
 
-def test_a_new_athena_workgroup_is_created_with_results_under_the_bucket() -> None:
+def test_rollup_workgroup_env_var_matches_the_tables_own_workgroup() -> None:
+    # RecordsRollupFunction does not create a workgroup of its own -- it
+    # defaults to IcebergRecordsTable's, which created exactly one, so the
+    # DDL and the rollup/reconcile queries share one workgroup by
+    # construction rather than by the caller coincidentally passing a
+    # matching string to both constructs.
     template = _template()
     workgroups = template.find_resources("AWS::Athena::WorkGroup")
     assert len(workgroups) == 1
     (workgroup,) = workgroups.values()
-    output_location = workgroup["Properties"]["WorkGroupConfiguration"][
-        "ResultConfiguration"
-    ]["OutputLocation"]
-    assert _contains_fragment(output_location, "s3://")
-    assert _contains_fragment(output_location, "/athena-results/")
+    workgroup_name = workgroup["Properties"]["Name"]
+    assert workgroup_name == "IcebergRecords-workgroup"
+
+    functions = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": ("batch_event_job_monitor.handlers.rollup_handler.handler")
+            }
+        },
+    )
+    for resource in functions.values():
+        variables = resource["Properties"]["Environment"]["Variables"]
+        assert variables["ROLLUP_WORKGROUP"] == workgroup_name
+
+
+def test_processing_bucket_has_eventbridge_notifications_enabled() -> None:
+    # Without this the "records/" EventBridge rule never fires -- S3 only
+    # emits to EventBridge when the bucket opts in. CDK applies this
+    # through a Custom::S3BucketNotifications resource, not an inline
+    # property on the bucket itself.
+    template = _template()
+    notifications = template.find_resources("Custom::S3BucketNotifications")
+    assert len(notifications) == 1
+    (notification,) = notifications.values()
+    config = notification["Properties"]["NotificationConfiguration"]
+    assert "EventBridgeConfiguration" in config
+
+
+def test_staging_prefix_has_a_seven_day_expiration_lifecycle_rule() -> None:
+    template = _template()
+    buckets = template.find_resources("AWS::S3::Bucket")
+    (bucket,) = buckets.values()
+    rules = bucket["Properties"]["LifecycleConfiguration"]["Rules"]
+    staging_rule = next(rule for rule in rules if rule.get("Prefix") == "staging/")
+    assert staging_rule["ExpirationInDays"] == 7
+    assert staging_rule["Status"] == "Enabled"
+
+
+def test_both_functions_can_invoke_themselves() -> None:
+    # The one permission the whole RecursiveLoop.ALLOW design depends on.
+    # Scoped to logical ids containing "SelfInvoke" -- the DDL custom
+    # resource's own framework role also carries an unrelated
+    # lambda:InvokeFunction statement (Task 11), which a bare Action-based
+    # search would otherwise also match.
+    template = _template()
+    policies = template.find_resources(
+        "AWS::IAM::Policy",
+        {
+            "Properties": {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [Match.object_like({"Action": "lambda:InvokeFunction"})]
+                    )
+                }
+            }
+        },
+    )
+    self_invoke_policies = {
+        logical_id: resource
+        for logical_id, resource in policies.items()
+        if "SelfInvoke" in logical_id
+    }
+    assert len(self_invoke_policies) == 2
+    for resource in self_invoke_policies.values():
+        statement = resource["Properties"]["PolicyDocument"]["Statement"][0]
+        resources = statement["Resource"]
+        assert isinstance(resources, list)
+        assert len(resources) == 2

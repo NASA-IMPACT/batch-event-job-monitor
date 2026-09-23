@@ -16,6 +16,7 @@ from aws_cdk import (
     CustomResource,
     Duration,
     RemovalPolicy,
+    aws_athena as athena,
     aws_glue as glue,
     aws_iam as iam,
     aws_lambda as lambda_,
@@ -36,6 +37,7 @@ from .partition_key_spec import PartitionKeySpec
 
 ICEBERG_PREFIX = "iceberg/records/"
 STAGING_PREFIX = "staging/"
+ATHENA_RESULTS_PREFIX = "athena-results/"
 
 
 class IcebergRecordsTable(Construct):
@@ -60,8 +62,14 @@ class IcebergRecordsTable(Construct):
         time-of-day must match the S3 delivery hour.
     partition_keys : list[PartitionKeySpec]
         Ordered partition keys, including the leading job_type entry.
-    workgroup_name : str, optional
-        Athena workgroup the DDL runs in. Defaults to "primary".
+    workgroup_name : str or None, optional
+        Athena workgroup the DDL runs in. When None (the default), this
+        construct creates its own workgroup (exposed as ``workgroup``)
+        with query results under ``s3://{processing_bucket_name}/
+        athena-results/`` and orders the DDL custom resource after it.
+        Pass an existing workgroup's name to skip creating one; in that
+        case its query results location is not this construct's
+        responsibility.
     iceberg_table_name : str, optional
         Name of the Iceberg table. Defaults to "records_iceberg".
     staging_table_name : str, optional
@@ -86,6 +94,15 @@ class IcebergRecordsTable(Construct):
         Name of the inventory table.
     table_location : str
         s3:// URI of the Iceberg table's data location.
+    inventory_location_s3path : str
+        s3:// URI of the records prefix's S3 Inventory Hive symlink
+        manifests, as given.
+    workgroup_name : str
+        Name of the Athena workgroup the DDL runs in -- either the name
+        handed in, or the name of the workgroup created here.
+    workgroup : athena.CfnWorkGroup or None
+        The Athena workgroup created here, or None when an existing
+        workgroup name was handed in instead.
     """
 
     def __init__(
@@ -99,7 +116,7 @@ class IcebergRecordsTable(Construct):
         records_inventory_location_s3path: str,
         inventory_datetime_start: dt.datetime,
         partition_keys: list[PartitionKeySpec],
-        workgroup_name: str = "primary",
+        workgroup_name: str | None = None,
         iceberg_table_name: str = "records_iceberg",
         staging_table_name: str = "records_staging",
         inventory_table_name: str = "records_inventory",
@@ -112,6 +129,11 @@ class IcebergRecordsTable(Construct):
         self.staging_table_name = staging_table_name
         self.inventory_table_name = inventory_table_name
         self.table_location = f"s3://{processing_bucket_name}/{ICEBERG_PREFIX}"
+        self.inventory_location_s3path = records_inventory_location_s3path
+
+        self.workgroup_name, self.workgroup = self._resolve_workgroup(
+            workgroup_name, processing_bucket_name=processing_bucket_name
+        )
 
         partition_key_names = [key.name for key in partition_keys]
 
@@ -136,7 +158,7 @@ class IcebergRecordsTable(Construct):
             database_name=database_name,
             processing_bucket_name=processing_bucket_name,
             partition_key_names=partition_key_names,
-            workgroup_name=workgroup_name,
+            workgroup_name=self.workgroup_name,
             removal_policy=removal_policy,
         )
 
@@ -144,6 +166,43 @@ class IcebergRecordsTable(Construct):
             database_name=database_name,
             processing_bucket_name=processing_bucket_name,
         )
+
+    def _resolve_workgroup(
+        self, workgroup_name: str | None, *, processing_bucket_name: str
+    ) -> tuple[str, athena.CfnWorkGroup | None]:
+        """Resolve the Athena workgroup name, creating one if not handed in.
+
+        Parameters
+        ----------
+        workgroup_name : str or None
+            Caller-supplied workgroup name, or None to create one here.
+        processing_bucket_name : str
+            Bucket the created workgroup's query results are written
+            under.
+
+        Returns
+        -------
+        tuple[str, athena.CfnWorkGroup or None]
+            The resolved workgroup name, and the CfnWorkGroup created here
+            (None when an existing name was handed in).
+        """
+        if workgroup_name is not None:
+            return workgroup_name, None
+
+        name = f"{self.node.id}-workgroup"
+        workgroup = athena.CfnWorkGroup(
+            self,
+            "Workgroup",
+            name=name,
+            work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
+                result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
+                    output_location=(
+                        f"s3://{processing_bucket_name}/{ATHENA_RESULTS_PREFIX}"
+                    ),
+                ),
+            ),
+        )
+        return name, workgroup
 
     def _create_staging_table(
         self,
@@ -272,6 +331,8 @@ class IcebergRecordsTable(Construct):
             },
         )
         resource.node.add_dependency(database)
+        if self.workgroup is not None:
+            resource.node.add_dependency(self.workgroup)
         return resource
 
     def _create_table_optimizer(

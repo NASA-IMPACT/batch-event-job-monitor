@@ -12,7 +12,6 @@ from typing import Any
 from aws_cdk import (
     Aws,
     Duration,
-    aws_athena as athena,
     aws_events as events,
     aws_events_targets as targets,
     aws_iam as iam,
@@ -22,14 +21,38 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-from .iceberg_records_table import ICEBERG_PREFIX, STAGING_PREFIX, IcebergRecordsTable
+from .iceberg_records_table import (
+    ATHENA_RESULTS_PREFIX,
+    ICEBERG_PREFIX,
+    STAGING_PREFIX,
+    IcebergRecordsTable,
+)
 from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from .partition_key_spec import PartitionKeySpec
 
 RECORDS_PREFIX = "records/"
-ATHENA_RESULTS_PREFIX = "athena-results/"
 _ROLLUP_TIMEOUT = Duration.minutes(15)
 _DLQ_MAX_RECEIVE_COUNT = 5
+_STAGING_EXPIRATION = Duration.days(7)
+
+
+def _object_arn_from_s3_uri(s3_uri: str) -> str:
+    """Build an S3 object ARN wildcard covering everything under a URI.
+
+    Parameters
+    ----------
+    s3_uri : str
+        An ``s3://bucket/prefix/`` URI. Must be a literal string (not a
+        CDK token) -- the bucket and prefix are parsed out of it directly.
+
+    Returns
+    -------
+    str
+        ``arn:aws:s3:::bucket/prefix/*``.
+    """
+    without_scheme = s3_uri.removeprefix("s3://")
+    bucket, _, key_prefix = without_scheme.partition("/")
+    return f"arn:aws:s3:::{bucket}/{key_prefix}*"
 
 
 class RecordsRollupFunction(Construct):
@@ -41,29 +64,29 @@ class RecordsRollupFunction(Construct):
         Parent construct.
     construct_id : str
         Construct id, unique within scope.
-    processing_bucket : s3.IBucket
-        Bucket holding records/, staging/, and the Iceberg data.
+    processing_bucket : s3.Bucket
+        Bucket holding records/, staging/, and the Iceberg data. A
+        concrete Bucket (not s3.IBucket) is required so this construct can
+        call enable_event_bridge_notification() and add a lifecycle rule
+        on it -- both are Bucket-only methods, not part of the IBucket
+        interface an imported/foreign bucket would satisfy.
     database_name : str
         Glue database holding the rollup tables.
     iceberg_table : IcebergRecordsTable
-        The table this rollup maintains. Its ``ddl_resource`` is used to
-        order the table's DDL after a workgroup created here (see
-        ``workgroup_name``).
+        The table this rollup maintains. Its ``workgroup_name`` is this
+        construct's default Athena workgroup (see ``workgroup_name``), and
+        its ``inventory_location_s3path`` scopes the reconcile Lambda's
+        read grant on the S3 Inventory data reconcile anti-joins against.
     partition_keys : list[PartitionKeySpec]
         Ordered partition keys, including the leading job_type entry.
     workgroup_name : str or None, optional
-        Athena workgroup the rollup/reconcile Lambdas query through. When
-        None (the default), this construct creates its own workgroup with
-        query results under ``processing_bucket`` and adds an explicit
-        CloudFormation dependency so ``iceberg_table``'s DDL custom
-        resource cannot run before the workgroup exists. Pass an existing
-        workgroup's name to skip creating one -- in that case ``iceberg_
-        table`` was presumably already built against the same name (a bare
-        string, so CDK cannot express that coupling as a resource
-        reference) and this construct assumes, but cannot verify, that the
-        handed-in workgroup's query results also live under
-        ``processing_bucket``; if they do not, the S3 grant for the Athena
-        results location here is wrong and must be widened by the caller.
+        Athena workgroup the rollup/reconcile Lambdas query through.
+        Defaults to ``iceberg_table.workgroup_name`` -- the same workgroup
+        the table's own DDL runs in, so both constructs share one
+        workgroup (and its results location) without CDK having to infer
+        that coupling from two bare strings. Pass an explicit name only to
+        deliberately use a different workgroup for these two Lambdas than
+        the one the table's DDL used.
     rollup_schedule : events.Schedule, optional
         Rollup cadence. Defaults to hourly.
     reconcile_schedule : events.Schedule, optional
@@ -85,9 +108,6 @@ class RecordsRollupFunction(Construct):
         The scheduled rollup Lambda.
     reconcile_function : lambda_.Function
         The scheduled reconcile Lambda.
-    workgroup : athena.CfnWorkGroup or None
-        The Athena workgroup created here, or None when an existing
-        workgroup name was handed in instead.
     """
 
     def __init__(
@@ -95,7 +115,7 @@ class RecordsRollupFunction(Construct):
         scope: Construct,
         construct_id: str,
         *,
-        processing_bucket: s3.IBucket,
+        processing_bucket: s3.Bucket,
         database_name: str,
         iceberg_table: IcebergRecordsTable,
         partition_keys: list[PartitionKeySpec],
@@ -108,10 +128,15 @@ class RecordsRollupFunction(Construct):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        resolved_workgroup_name, self.workgroup = self._resolve_workgroup(
-            workgroup_name,
-            processing_bucket=processing_bucket,
-            iceberg_table=iceberg_table,
+        resolved_workgroup_name = (
+            workgroup_name
+            if workgroup_name is not None
+            else iceberg_table.workgroup_name
+        )
+
+        processing_bucket.enable_event_bridge_notification()
+        processing_bucket.add_lifecycle_rule(
+            prefix=STAGING_PREFIX, expiration=_STAGING_EXPIRATION
         )
 
         self.dlq = sqs.Queue(self, "RollupDlq", retention_period=Duration.days(14))
@@ -152,13 +177,9 @@ class RecordsRollupFunction(Construct):
             "ROLLUP_MAX_DEPTH": str(max_chain_depth),
         }
 
-        self.rollup_function = self._create_function(
-            "RollupFunction", environment, function_name=f"{self.node.id}-rollup"
-        )
+        self.rollup_function = self._create_function("RollupFunction", environment)
         self.reconcile_function = self._create_function(
-            "ReconcileFunction",
-            environment,
-            function_name=f"{self.node.id}-reconcile",
+            "ReconcileFunction", environment
         )
 
         bucket_arn = f"arn:aws:s3:::{processing_bucket.bucket_name}"
@@ -176,6 +197,9 @@ class RecordsRollupFunction(Construct):
             bucket_arn,
             f"{bucket_arn}/{ATHENA_RESULTS_PREFIX}*",
         ]
+        inventory_resource = _object_arn_from_s3_uri(
+            iceberg_table.inventory_location_s3path
+        )
 
         self._grant_rollup(
             self.rollup_function,
@@ -191,6 +215,7 @@ class RecordsRollupFunction(Construct):
             glue_arns=glue_arns,
             iceberg_data_resources=iceberg_data_resources,
             athena_results_resources=athena_results_resources,
+            inventory_resource=inventory_resource,
         )
 
         self.queue.grant_consume_messages(self.rollup_function)
@@ -223,57 +248,8 @@ class RecordsRollupFunction(Construct):
             ],
         )
 
-    def _resolve_workgroup(
-        self,
-        workgroup_name: str | None,
-        *,
-        processing_bucket: s3.IBucket,
-        iceberg_table: IcebergRecordsTable,
-    ) -> tuple[str, athena.CfnWorkGroup | None]:
-        """Resolve the Athena workgroup name, creating one if not handed in.
-
-        Parameters
-        ----------
-        workgroup_name : str or None
-            Caller-supplied workgroup name, or None to create one here.
-        processing_bucket : s3.IBucket
-            Bucket the created workgroup's query results are written under.
-        iceberg_table : IcebergRecordsTable
-            Table whose DDL custom resource must not run before a
-            workgroup created here exists.
-
-        Returns
-        -------
-        tuple[str, athena.CfnWorkGroup or None]
-            The resolved workgroup name, and the CfnWorkGroup created here
-            (None when an existing name was handed in).
-        """
-        if workgroup_name is not None:
-            return workgroup_name, None
-
-        name = f"{self.node.id}-records-rollup"
-        workgroup = athena.CfnWorkGroup(
-            self,
-            "Workgroup",
-            name=name,
-            work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
-                result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
-                    output_location=(
-                        f"s3://{processing_bucket.bucket_name}/{ATHENA_RESULTS_PREFIX}"
-                    ),
-                ),
-            ),
-        )
-        # IcebergRecordsTable takes workgroup_name as a bare string, so its
-        # DDL custom resource has no CDK-level reference to this workgroup.
-        # This dependency only orders the two correctly when the caller
-        # also passed this same name into IcebergRecordsTable's own
-        # workgroup_name.
-        iceberg_table.ddl_resource.node.add_dependency(workgroup)
-        return name, workgroup
-
     def _create_function(
-        self, construct_id: str, environment: dict[str, str], *, function_name: str
+        self, construct_id: str, environment: dict[str, str]
     ) -> lambda_.Function:
         """Build one rollup/reconcile Lambda from the shared handler asset.
 
@@ -284,15 +260,6 @@ class RecordsRollupFunction(Construct):
         environment : dict[str, str]
             Environment variables read by
             batch_event_job_monitor.handlers.rollup_handler.
-        function_name : str
-            Explicit, deterministic function name. Required (rather than
-            left to CloudFormation to auto-generate) so the self-invoke
-            grant below can be built from a literal ARN string instead of
-            a reference to the function's own logical id -- referencing a
-            just-created function's Fn::GetAtt from its own role policy
-            produces a CloudFormation dependency cycle (the function
-            depends on its role's policy, and the policy would depend on
-            the function).
 
         Returns
         -------
@@ -306,7 +273,6 @@ class RecordsRollupFunction(Construct):
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="batch_event_job_monitor.handlers.rollup_handler.handler",
             code=lambda_.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
-            function_name=function_name,
             timeout=_ROLLUP_TIMEOUT,
             memory_size=1024,
             environment=environment,
@@ -320,14 +286,26 @@ class RecordsRollupFunction(Construct):
             recursive_loop=lambda_.RecursiveLoop.ALLOW,
             retry_attempts=0,
         )
-        self_arn = (
-            f"arn:aws:lambda:{Aws.REGION}:{Aws.ACCOUNT_ID}:function:{function_name}"
-        )
-        function.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["lambda:InvokeFunction"],
-                resources=[self_arn, f"{self_arn}:*"],
-            )
+        # A self-invoke grant added to the function's own *default* role
+        # policy creates a CloudFormation dependency cycle: the function
+        # depends on its role's default policy, and a statement naming the
+        # function's own ARN makes the policy depend back on the function.
+        # A separate, non-default iam.Policy resource sits outside that
+        # cycle while still attaching to the same role.
+        assert function.role is not None
+        iam.Policy(
+            self,
+            f"{construct_id}SelfInvoke",
+            statements=[
+                iam.PolicyStatement(
+                    actions=["lambda:InvokeFunction"],
+                    resources=[
+                        function.function_arn,
+                        f"{function.function_arn}:*",
+                    ],
+                )
+            ],
+            roles=[function.role],
         )
         return function
 
@@ -367,7 +345,12 @@ class RecordsRollupFunction(Construct):
         )
         function.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:PutObject", "s3:DeleteObject"],
+                # GetObject is required alongside the writes: the Athena
+                # MERGE's USING source is the staging Glue table
+                # (rollup_schema.py), and Athena reads a table's
+                # underlying data as the calling identity, not a separate
+                # service role.
+                actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
                 resources=[f"{bucket_arn}/{STAGING_PREFIX}*"],
             )
         )
@@ -404,6 +387,7 @@ class RecordsRollupFunction(Construct):
         glue_arns: list[str],
         iceberg_data_resources: list[str],
         athena_results_resources: list[str],
+        inventory_resource: str,
     ) -> None:
         """Grant the reconcile Lambda's read-only permissions.
 
@@ -424,11 +408,20 @@ class RecordsRollupFunction(Construct):
             location.
         athena_results_resources : list[str]
             Bucket and object ARNs covering the Athena results location.
+        inventory_resource : str
+            Object ARN covering the S3 Inventory location the inventory
+            table's reconcile_sql anti-join reads.
         """
         function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:ListBucket"],
                 resources=iceberg_data_resources,
+            )
+        )
+        function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[inventory_resource],
             )
         )
         function.add_to_role_policy(
