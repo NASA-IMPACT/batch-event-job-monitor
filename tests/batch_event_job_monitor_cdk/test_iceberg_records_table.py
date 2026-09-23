@@ -266,3 +266,10 @@ def test_ddl_handler_role_can_run_the_ddl_through_athena() -> None:
             }
         },
     )
+
+
+def test_constructs_are_exported_from_the_package() -> None:
+    import batch_event_job_monitor_cdk as package
+
+    assert package.IcebergRecordsTable is IcebergRecordsTable
+    assert hasattr(package, "RecordsRollupFunction")
