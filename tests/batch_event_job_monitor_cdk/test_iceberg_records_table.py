@@ -15,8 +15,10 @@ PARTITION_KEYS = [
     PartitionKeySpec("tile_id", "string", "injected"),
 ]
 
+INVENTORY_LOCATION = "s3://test-bucket/inv/test-bucket/records/hive/"
 
-def _template() -> Template:
+
+def _construct() -> tuple[Stack, IcebergRecordsTable]:
     app = App()
     stack = Stack(app, "TestStack")
     database = glue.CfnDatabase(
@@ -25,17 +27,22 @@ def _template() -> Template:
         catalog_id="123456789012",
         database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
     )
-    IcebergRecordsTable(
+    construct = IcebergRecordsTable(
         stack,
         "IcebergRecords",
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
-        records_inventory_location_s3path="s3://test-bucket/inv/test-bucket/records/hive/",
+        records_inventory_location_s3path=INVENTORY_LOCATION,
         inventory_datetime_start=dt.datetime(2026, 1, 1, 1, 0),
         partition_keys=PARTITION_KEYS,
         removal_policy=RemovalPolicy.DESTROY,
     )
+    return stack, construct
+
+
+def _template() -> Template:
+    stack, _ = _construct()
     return Template.from_stack(stack)
 
 
@@ -49,6 +56,25 @@ def test_staging_table_is_partitioned_by_run_id_with_injected_projection() -> No
                     "Parameters": Match.object_like(
                         {"projection.run_id.type": "injected"}
                     ),
+                }
+            )
+        },
+    )
+
+
+def test_staging_table_storage_location_template() -> None:
+    _template().has_resource_properties(
+        "AWS::Glue::Table",
+        {
+            "TableInput": Match.object_like(
+                {
+                    "Parameters": Match.object_like(
+                        {
+                            "storage.location.template": (
+                                "s3://test-bucket/staging/run_id=${run_id}/"
+                            )
+                        }
+                    )
                 }
             )
         },
@@ -85,7 +111,21 @@ def test_table_optimizer_is_enabled_for_compaction() -> None:
 
 
 def test_records_inventory_table_is_created() -> None:
-    _template().resource_count_is("AWS::Glue::Table", 2)
+    template = _template()
+    template.resource_count_is("AWS::Glue::Table", 2)
+    template.has_resource_properties(
+        "AWS::Glue::Table",
+        {
+            "TableInput": Match.object_like(
+                {
+                    "Name": "records_inventory",
+                    "StorageDescriptor": Match.object_like(
+                        {"Location": INVENTORY_LOCATION}
+                    ),
+                }
+            )
+        },
+    )
 
 
 def test_ddl_custom_resource_receives_the_partition_key_names() -> None:
@@ -99,6 +139,27 @@ def test_ddl_custom_resource_receives_the_partition_key_names() -> None:
             }
         ),
     )
+
+
+def test_ddl_custom_resource_receives_the_table_location_and_workgroup() -> None:
+    _template().has_resource_properties(
+        "Custom::IcebergRecordsTable",
+        Match.object_like(
+            {
+                "Table": "records_iceberg",
+                "Location": "s3://test-bucket/iceberg/records/",
+                "Workgroup": "primary",
+            }
+        ),
+    )
+
+
+def test_exposed_attributes_are_the_table_names_and_location() -> None:
+    _, construct = _construct()
+    assert construct.iceberg_table_name == "records_iceberg"
+    assert construct.staging_table_name == "records_staging"
+    assert construct.inventory_table_name == "records_inventory"
+    assert construct.table_location == "s3://test-bucket/iceberg/records/"
 
 
 def test_ddl_handler_role_can_read_the_live_table_schema() -> None:

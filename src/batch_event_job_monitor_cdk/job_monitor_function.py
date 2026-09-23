@@ -13,7 +13,6 @@ subpackage.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from aws_cdk import (
@@ -25,18 +24,9 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-import batch_event_job_monitor
 from batch_event_job_monitor.models import PARAM_PREFIX, JobTypeConfig
+from batch_event_job_monitor_cdk.lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
-
-_HANDLER_ENTRY = str(Path(batch_event_job_monitor.__file__).parent.parent)
-_HANDLER_EXCLUDE = [
-    "*",
-    "!batch_event_job_monitor",
-    "!batch_event_job_monitor/**",
-    "**/__pycache__",
-    "**/*.pyc",
-]
 
 # Every Batch job lifecycle status. JobMonitorFunction tracks the full
 # lifecycle (not just terminal SUCCEEDED/FAILED), so ad hoc/backfill job
@@ -160,7 +150,7 @@ class JobMonitorFunction(Construct):
             "Function",
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="batch_event_job_monitor.handlers.job_monitor_handler.handler",
-            code=_lambda.Code.from_asset(_HANDLER_ENTRY, exclude=_HANDLER_EXCLUDE),
+            code=_lambda.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
             function_name=function_name,
             memory_size=memory_size,
             timeout=timeout,

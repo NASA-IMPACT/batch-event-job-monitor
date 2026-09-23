@@ -31,6 +31,7 @@ from .athena_common import (
     JSON_SERDE,
     create_inventory_table,
 )
+from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from .partition_key_spec import PartitionKeySpec
 
 ICEBERG_PREFIX = "iceberg/records/"
@@ -68,8 +69,10 @@ class IcebergRecordsTable(Construct):
     inventory_table_name : str, optional
         Name of the inventory table. Defaults to "records_inventory".
     removal_policy : RemovalPolicy, optional
-        Removal policy for the catalog entries. Defaults to
-        RemovalPolicy.RETAIN.
+        Removal policy for the Iceberg table (applied via the DDL custom
+        resource). The staging table and the inventory table are always
+        DESTROY, matching the other inventory-backed tables in this package.
+        Defaults to RemovalPolicy.RETAIN.
     **kwargs : Any
         Additional keyword arguments forwarded to the Construct base class.
 
@@ -202,26 +205,48 @@ class IcebergRecordsTable(Construct):
             "DdlFunction",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="batch_event_job_monitor.handlers.iceberg_ddl_handler.handler",
-            code=lambda_.Code.from_asset("src"),
+            code=lambda_.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
             timeout=Duration.minutes(10),
+        )
+        workgroup_arn = (
+            f"arn:aws:athena:{Aws.REGION}:{Aws.ACCOUNT_ID}:workgroup/{workgroup_name}"
+        )
+        ddl_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["athena:StartQueryExecution", "athena:GetQueryExecution"],
+                resources=[workgroup_arn],
+            )
         )
         ddl_function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=[
-                    "athena:StartQueryExecution",
-                    "athena:GetQueryExecution",
                     "glue:GetDatabase",
                     "glue:GetTable",
                     "glue:CreateTable",
                     "glue:UpdateTable",
                     "glue:DeleteTable",
                 ],
-                resources=["*"],
+                resources=self._glue_table_arns(
+                    database_name=database_name, table_name=self.iceberg_table_name
+                ),
             )
         )
         ddl_function.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+                # Matches Athena's documented minimum grant for a
+                # query-results location; DeleteObject is additionally
+                # required because Athena's Iceberg DROP TABLE deletes the
+                # table's data and metadata files in S3.
+                actions=[
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                    "s3:AbortMultipartUpload",
+                    "s3:ListBucketMultipartUploads",
+                    "s3:ListMultipartUploadParts",
+                ],
                 resources=[
                     f"arn:aws:s3:::{processing_bucket_name}",
                     f"arn:aws:s3:::{processing_bucket_name}/*",
@@ -255,7 +280,10 @@ class IcebergRecordsTable(Construct):
         optimizer_role = iam.Role(
             self,
             "TableOptimizerRole",
-            assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
+            assumed_by=iam.ServicePrincipal(
+                "glue.amazonaws.com",
+                conditions={"StringEquals": {"aws:SourceAccount": Aws.ACCOUNT_ID}},
+            ),
         )
         optimizer_role.add_to_policy(
             iam.PolicyStatement(
@@ -274,7 +302,9 @@ class IcebergRecordsTable(Construct):
         optimizer_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["glue:GetTable", "glue:UpdateTable"],
-                resources=["*"],
+                resources=self._glue_table_arns(
+                    database_name=database_name, table_name=self.iceberg_table_name
+                ),
             )
         )
 
@@ -293,3 +323,28 @@ class IcebergRecordsTable(Construct):
             ),
         )
         optimizer.node.add_dependency(self.ddl_resource)
+
+    @staticmethod
+    def _glue_table_arns(*, database_name: str, table_name: str) -> list[str]:
+        """Build the catalog/database/table ARN triple for one Glue table.
+
+        Parameters
+        ----------
+        database_name : str
+            Glue database name.
+        table_name : str
+            Glue table name.
+
+        Returns
+        -------
+        list[str]
+            The catalog, database, and table ARNs, in that order. Glue
+            CreateTable/UpdateTable/DeleteTable/GetTable each act on the
+            table but also require catalog- and database-level permission.
+        """
+        return [
+            f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:catalog",
+            f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:database/{database_name}",
+            f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:table/"
+            f"{database_name}/{table_name}",
+        ]
