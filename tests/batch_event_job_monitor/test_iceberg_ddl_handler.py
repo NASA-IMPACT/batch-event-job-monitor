@@ -215,6 +215,17 @@ def test_update_falls_back_to_create_when_the_table_is_not_yet_in_the_catalog(
     assert "CREATE TABLE IF NOT EXISTS" in athena.started[0]
 
 
+def test_deployed_columns_raises_diagnosably_on_a_malformed_response() -> None:
+    class BrokenGlue:
+        def get_table(self, **kwargs: Any) -> dict[str, Any]:
+            return {"Table": {}}
+
+    with pytest.raises(RuntimeError, match="StorageDescriptor"):
+        iceberg_ddl_handler._deployed_columns(
+            glue_client=BrokenGlue(), database="test_db", table="records_iceberg"
+        )
+
+
 def test_added_column_sql_emits_one_alter_per_new_column() -> None:
     statements = added_column_sql(
         database="test_db",
@@ -245,3 +256,25 @@ def test_added_column_sql_refuses_a_retyped_column() -> None:
             old_columns=[("job_type", "string"), ("attempt", "int")],
             new_columns=[("job_type", "string"), ("attempt", "string")],
         )
+
+
+def test_added_column_sql_tolerates_glues_type_string_normalization() -> None:
+    # Glue's catalog-normalized type string need not match the hand-written
+    # one in rollup_schema.py byte for byte -- differing case and internal
+    # whitespace within a nested type is not a real retype.
+    statements = added_column_sql(
+        database="test_db",
+        table="records_iceberg",
+        old_columns=[
+            ("job_type", "string"),
+            (
+                "events",
+                "ARRAY<STRUCT<state: string, timestamp: string>>",
+            ),
+        ],
+        new_columns=[
+            ("job_type", "string"),
+            ("events", "array<struct<state:string,timestamp:string>>"),
+        ],
+    )
+    assert statements == []

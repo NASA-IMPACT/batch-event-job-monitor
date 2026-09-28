@@ -1,8 +1,8 @@
 """CloudFormation custom resource handler creating the Iceberg records table.
 
-Athena DDL rather than a Glue CfnTable: a Glue catalog entry for an Iceberg
-table is only valid once the table's metadata file exists, which CREATE TABLE
-writes and CloudFormation cannot.
+A Glue catalog entry for an Iceberg table is only valid once the table's
+metadata file exists, so this handler creates and updates the table by
+running DDL directly through Athena.
 """
 
 from __future__ import annotations
@@ -21,6 +21,28 @@ _glue_client = boto3.client("glue")
 
 class IncompatibleSchemaChange(RuntimeError):
     """Raised when an update would remove or retype an existing column."""
+
+
+def _normalize_type(col_type: str) -> str:
+    """Normalize a catalog type string for comparison.
+
+    Glue's catalog-normalized type strings are not guaranteed to match the
+    hand-written strings in rollup_schema.py byte for byte -- spacing
+    within a nested type such as array<struct<...>> and letter case can
+    both differ without the type actually differing.
+
+    Parameters
+    ----------
+    col_type : str
+        A column type string, from either the live catalog or this
+        package's own schema declarations.
+
+    Returns
+    -------
+    str
+        The type with all whitespace removed and folded to lowercase.
+    """
+    return "".join(col_type.split()).lower()
 
 
 def added_column_sql(
@@ -66,7 +88,8 @@ def added_column_sql(
     retyped = [
         name
         for name, old_type in old_by_name.items()
-        if name in new_by_name and new_by_name[name] != old_type
+        if name in new_by_name
+        and _normalize_type(new_by_name[name]) != _normalize_type(old_type)
     ]
     if removed or retyped:
         problems = [f"{name!r} removed" for name in removed]
@@ -89,12 +112,7 @@ def _deployed_columns(
 ) -> list[tuple[str, str]] | None:
     """Read the live Glue Data Catalog schema for an existing table.
 
-    The code currently running is not a reliable source for what a table
-    was declared with at the time of its last deploy: two calls to
-    iceberg_columns always agree on every column but the partition keys,
-    because the fixed body columns come from constants in whichever code
-    happens to be running both calls. Only the catalog records what a
-    previous deploy actually created.
+    Only the catalog records what a previous deploy actually created.
 
     Parameters
     ----------
@@ -117,7 +135,14 @@ def _deployed_columns(
         if exc.response["Error"]["Code"] == "EntityNotFoundException":
             return None
         raise
-    columns = response["Table"]["StorageDescriptor"]["Columns"]
+    try:
+        columns = response["Table"]["StorageDescriptor"]["Columns"]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Glue GetTable response for {database!r}.{table!r} has no "
+            "Table.StorageDescriptor.Columns; cannot compare it against the "
+            f"declared schema (response keys: {sorted(response.get('Table', {}))})"
+        ) from exc
     return [(column["Name"], column["Type"]) for column in columns]
 
 
