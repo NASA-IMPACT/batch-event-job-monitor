@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import json
 import logging
-import os
 import tempfile
 import time
 import uuid
@@ -352,17 +351,12 @@ def write_staging_object(
         The S3 key written.
     """
     key = f"{staging_prefix}run_id={run_id}/part.ndjson.gz"
-    with tempfile.NamedTemporaryFile(suffix=".ndjson.gz", delete=False) as handle:
-        path = handle.name
-    try:
-        with gzip.open(path, "wt", encoding="utf-8") as stream:
+    with tempfile.NamedTemporaryFile(suffix=".ndjson.gz") as handle:
+        with gzip.GzipFile(fileobj=handle, mode="wb") as stream:
             for row in rows:
-                stream.write(json.dumps(row))
-                stream.write("\n")
-        with open(path, "rb") as body:
-            s3_client.put_object(Bucket=bucket, Key=key, Body=body)
-    finally:
-        os.unlink(path)
+                stream.write(f"{json.dumps(row)}\n".encode())
+        handle.seek(0)
+        s3_client.put_object(Bucket=bucket, Key=key, Body=handle)
     return key
 
 
