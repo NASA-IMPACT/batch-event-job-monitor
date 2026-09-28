@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mypy_boto3_s3 import S3Client
@@ -333,6 +333,15 @@ def test_dedupe_leaves_distinct_natural_keys_untouched() -> None:
     assert len(deduped) == 2
 
 
+def fake_clients(*, s3: Any, sqs: Any, athena: Any, lambda_: Any) -> Clients:
+    """Build a Clients from test doubles.
+
+    The doubles implement only the handful of calls the pipeline makes, not
+    the full boto3 client protocols the production annotations declare.
+    """
+    return Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_)
+
+
 class FakeAthena:
     """Minimal Athena client returning a scripted sequence of states."""
 
@@ -355,7 +364,7 @@ def test_run_query_returns_the_execution_id_on_success() -> None:
     client = FakeAthena(["RUNNING", "SUCCEEDED"])
     sleep_calls: list[float] = []
     query_id = run_query(
-        athena_client=client,
+        athena_client=cast(Any, client),
         sql="SELECT 1",
         workgroup="wg",
         poll_seconds=0.5,
@@ -372,7 +381,7 @@ def test_run_query_raises_on_a_terminal_failure(state: str) -> None:
     sleep_calls: list[float] = []
     with pytest.raises(AthenaQueryError, match="boom"):
         run_query(
-            athena_client=client,
+            athena_client=cast(Any, client),
             sql="SELECT 1",
             workgroup="wg",
             sleep=sleep_calls.append,
@@ -421,7 +430,7 @@ def test_rollup_merges_and_deletes_messages_on_success(
 
     metrics = run_rollup(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
         depth=0,
     )
 
@@ -463,7 +472,7 @@ def test_rollup_collapses_objects_that_share_a_natural_key(
 
     metrics = run_rollup(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(
+        clients=fake_clients(
             s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=FakeLambda()
         ),
         depth=0,
@@ -481,7 +490,7 @@ def test_rollup_retains_messages_when_the_merge_fails(
     with pytest.raises(AthenaQueryError):
         run_rollup(
             config=_config(bucket, rollup_queue_url),
-            clients=Clients(
+            clients=fake_clients(
                 s3=s3, sqs=sqs, athena=FakeAthena(["FAILED"]), lambda_=FakeLambda()
             ),
             depth=0,
@@ -501,7 +510,7 @@ def test_rollup_skips_the_merge_when_nothing_was_drained(
 
     metrics = run_rollup(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
         depth=0,
     )
 
@@ -517,7 +526,7 @@ def test_rollup_deletes_messages_when_every_drained_object_is_missing(
 
     metrics = run_rollup(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
         depth=0,
     )
 
@@ -539,7 +548,9 @@ def test_rollup_deletes_a_message_with_no_extractable_key(
 
     metrics = run_rollup(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=FakeAthena([]), lambda_=FakeLambda()),
+        clients=fake_clients(
+            s3=s3, sqs=sqs, athena=FakeAthena([]), lambda_=FakeLambda()
+        ),
         depth=0,
     )
 
@@ -568,7 +579,7 @@ def test_rollup_chains_while_the_queue_is_not_empty(
     lambda_ = FakeLambda()
     run_rollup(
         config=_config(bucket, rollup_queue_url, max_keys=1),
-        clients=Clients(
+        clients=fake_clients(
             s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=lambda_
         ),
         depth=0,
@@ -589,7 +600,7 @@ def test_rollup_does_not_chain_past_max_depth(
     lambda_ = FakeLambda()
     run_rollup(
         config=_config(bucket, rollup_queue_url, max_keys=1, max_depth=1),
-        clients=Clients(
+        clients=fake_clients(
             s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=lambda_
         ),
         depth=0,
@@ -610,7 +621,7 @@ def test_rollup_emits_merge_duration_and_zero_failures_on_success(
 
     metrics = run_rollup(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(
+        clients=fake_clients(
             s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=FakeLambda()
         ),
         depth=0,
@@ -639,7 +650,7 @@ def test_rollup_counts_a_failure_and_still_emits_metrics_on_a_failed_merge(
     with pytest.raises(AthenaQueryError):
         run_rollup(
             config=_config(bucket, rollup_queue_url),
-            clients=Clients(
+            clients=fake_clients(
                 s3=s3, sqs=sqs, athena=FakeAthena(["FAILED"]), lambda_=FakeLambda()
             ),
             depth=0,
@@ -687,7 +698,7 @@ def test_reconcile_enqueues_keys_and_skips_the_header_row(
 
     metrics = run_reconcile(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
         depth=3,
     )
 
@@ -710,7 +721,7 @@ def test_reconcile_chains_when_the_time_budget_runs_out(
 
     run_reconcile(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
         depth=0,
         time_remaining_ms=lambda: 1_000,
     )
@@ -733,7 +744,7 @@ def test_reconcile_is_not_truncated_when_it_successfully_chains(
 
     metrics = run_reconcile(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
         depth=0,
         time_remaining_ms=lambda: 1_000,
     )
@@ -754,7 +765,7 @@ def test_reconcile_is_truncated_when_refused_at_max_depth(
 
     metrics = run_reconcile(
         config=_config(bucket, rollup_queue_url, max_depth=0),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
         depth=0,
         time_remaining_ms=lambda: 1_000,
     )
@@ -770,7 +781,7 @@ def test_reconcile_continues_an_existing_result_without_a_new_query(
 
     run_reconcile(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
         depth=1,
         query_execution_id="qid-1",
         next_token="token-2",
@@ -796,7 +807,7 @@ def test_reconcile_pages_within_one_invocation_without_reskipping_a_header(
 
     metrics = run_reconcile(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
         depth=0,
     )
 
@@ -814,7 +825,7 @@ def test_reconcile_on_a_converged_table_enqueues_nothing(
 
     metrics = run_reconcile(
         config=_config(bucket, rollup_queue_url),
-        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        clients=fake_clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
         depth=0,
     )
 

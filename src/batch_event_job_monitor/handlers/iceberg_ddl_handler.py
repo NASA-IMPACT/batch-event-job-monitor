@@ -7,13 +7,16 @@ running DDL directly through Athena.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import boto3
 from botocore.exceptions import ClientError
 
 from batch_event_job_monitor.rollup import run_query
 from batch_event_job_monitor.rollup_schema import create_table_sql, iceberg_columns
+
+if TYPE_CHECKING:
+    from mypy_boto3_glue import GlueClient
 
 _athena_client = boto3.client("athena")
 _glue_client = boto3.client("glue")
@@ -108,7 +111,7 @@ def added_column_sql(
 
 
 def _deployed_columns(
-    *, glue_client: Any, database: str, table: str
+    *, glue_client: GlueClient, database: str, table: str
 ) -> list[tuple[str, str]] | None:
     """Read the live Glue Data Catalog schema for an existing table.
 
@@ -116,7 +119,7 @@ def _deployed_columns(
 
     Parameters
     ----------
-    glue_client : Any
+    glue_client : GlueClient
         Boto3 Glue client.
     database : str
         Glue database name.

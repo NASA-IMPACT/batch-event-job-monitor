@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from botocore.exceptions import ClientError
@@ -222,7 +222,9 @@ def test_deployed_columns_raises_diagnosably_on_a_malformed_response() -> None:
 
     with pytest.raises(RuntimeError, match="StorageDescriptor"):
         iceberg_ddl_handler._deployed_columns(
-            glue_client=BrokenGlue(), database="test_db", table="records_iceberg"
+            glue_client=cast(Any, BrokenGlue()),
+            database="test_db",
+            table="records_iceberg",
         )
 
 

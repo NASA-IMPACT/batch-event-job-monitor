@@ -12,11 +12,17 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError
 
 from batch_event_job_monitor.rollup_schema import key_columns, merge_sql, reconcile_sql
+
+if TYPE_CHECKING:
+    from mypy_boto3_athena import AthenaClient
+    from mypy_boto3_lambda import LambdaClient
+    from mypy_boto3_s3 import S3Client
+    from mypy_boto3_sqs import SQSClient
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +120,7 @@ def _key_from_body(body: str) -> str | None:
         return None
 
 
-def drain_keys(*, sqs_client: Any, queue_url: str, max_keys: int) -> DrainedKeys:
+def drain_keys(*, sqs_client: SQSClient, queue_url: str, max_keys: int) -> DrainedKeys:
     """Drain notifications into a distinct key set.
 
     Stops once max_keys distinct keys have been seen; anything left stays on
@@ -122,7 +128,7 @@ def drain_keys(*, sqs_client: Any, queue_url: str, max_keys: int) -> DrainedKeys
 
     Parameters
     ----------
-    sqs_client : Any
+    sqs_client : SQSClient
         Boto3 SQS client.
     queue_url : str
         Rollup queue URL.
@@ -163,12 +169,12 @@ def drain_keys(*, sqs_client: Any, queue_url: str, max_keys: int) -> DrainedKeys
     return drained
 
 
-def queue_has_messages(*, sqs_client: Any, queue_url: str) -> bool:
+def queue_has_messages(*, sqs_client: SQSClient, queue_url: str) -> bool:
     """Report whether the queue still holds visible messages.
 
     Parameters
     ----------
-    sqs_client : Any
+    sqs_client : SQSClient
         Boto3 SQS client.
     queue_url : str
         Rollup queue URL.
@@ -207,7 +213,7 @@ class FetchResult:
 
 def fetch_rows(
     *,
-    s3_client: Any,
+    s3_client: S3Client,
     bucket: str,
     keys: list[str],
     partition_key_names: list[str],
@@ -222,7 +228,7 @@ def fetch_rows(
 
     Parameters
     ----------
-    s3_client : Any
+    s3_client : S3Client
         Boto3 S3 client.
     bucket : str
         Processing bucket name.
@@ -320,7 +326,7 @@ def dedupe_rows_by_natural_key(
 
 def write_staging_object(
     *,
-    s3_client: Any,
+    s3_client: S3Client,
     bucket: str,
     staging_prefix: str,
     run_id: str,
@@ -334,7 +340,7 @@ def write_staging_object(
 
     Parameters
     ----------
-    s3_client : Any
+    s3_client : S3Client
         Boto3 S3 client.
     bucket : str
         Processing bucket name.
@@ -369,7 +375,7 @@ class AthenaQueryError(RuntimeError):
 
 def run_query(
     *,
-    athena_client: Any,
+    athena_client: AthenaClient,
     sql: str,
     workgroup: str,
     poll_seconds: float = 1.0,
@@ -379,7 +385,7 @@ def run_query(
 
     Parameters
     ----------
-    athena_client : Any
+    athena_client : AthenaClient
         Boto3 Athena client.
     sql : str
         Statement to execute.
@@ -473,20 +479,20 @@ class Clients:
 
     Attributes
     ----------
-    s3 : Any
+    s3 : S3Client
         S3 client.
-    sqs : Any
+    sqs : SQSClient
         SQS client.
-    athena : Any
+    athena : AthenaClient
         Athena client.
-    lambda_ : Any
+    lambda_ : LambdaClient
         Lambda client, used only for self-invocation.
     """
 
-    s3: Any
-    sqs: Any
-    athena: Any
-    lambda_: Any
+    s3: S3Client
+    sqs: SQSClient
+    athena: AthenaClient
+    lambda_: LambdaClient
 
 
 _METRIC_UNITS = {"MergeDurationMs": "Milliseconds"}
@@ -525,7 +531,9 @@ def emit_metrics(*, namespace: str, metrics: dict[str, int]) -> None:
     print(json.dumps(record))
 
 
-def _delete_messages(*, sqs_client: Any, queue_url: str, handles: list[str]) -> None:
+def _delete_messages(
+    *, sqs_client: SQSClient, queue_url: str, handles: list[str]
+) -> None:
     for start in range(0, len(handles), _DELETE_BATCH):
         batch = handles[start : start + _DELETE_BATCH]
         sqs_client.delete_message_batch(
@@ -658,7 +666,7 @@ RECONCILE_TIME_BUDGET_MS = 120_000
 _SEND_BATCH = 10
 
 
-def _enqueue_keys(*, sqs_client: Any, queue_url: str, keys: list[str]) -> None:
+def _enqueue_keys(*, sqs_client: SQSClient, queue_url: str, keys: list[str]) -> None:
     for start in range(0, len(keys), _SEND_BATCH):
         batch = keys[start : start + _SEND_BATCH]
         sqs_client.send_message_batch(
