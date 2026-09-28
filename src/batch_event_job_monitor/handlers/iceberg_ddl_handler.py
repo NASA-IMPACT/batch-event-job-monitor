@@ -104,7 +104,7 @@ def added_column_sql(
             "manual migration required for incompatible columns: " + ", ".join(problems)
         )
     return [
-        f'ALTER TABLE "{database}"."{table}" ADD COLUMNS ("{name}" {col_type})'
+        f"ALTER TABLE {database}.{table} ADD COLUMNS ({name} {col_type})"
         for name, col_type in new_columns
         if name not in old_by_name
     ]

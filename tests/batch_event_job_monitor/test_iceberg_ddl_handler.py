@@ -119,7 +119,7 @@ def test_update_adds_a_column_for_a_new_partition_key(
         None,
     )
     assert athena.started == [
-        'ALTER TABLE "test_db"."records_iceberg" ADD COLUMNS ("tile_id" string)'
+        "ALTER TABLE test_db.records_iceberg ADD COLUMNS (tile_id string)"
     ]
 
 
@@ -236,7 +236,7 @@ def test_added_column_sql_emits_one_alter_per_new_column() -> None:
         new_columns=[("job_type", "string"), ("attempt", "int"), ("note", "string")],
     )
     assert statements == [
-        'ALTER TABLE "test_db"."records_iceberg" ADD COLUMNS ("note" string)'
+        "ALTER TABLE test_db.records_iceberg ADD COLUMNS (note string)"
     ]
 
 

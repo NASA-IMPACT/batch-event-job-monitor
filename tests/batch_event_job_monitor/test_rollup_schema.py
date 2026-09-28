@@ -52,13 +52,13 @@ def test_create_table_sql_declares_iceberg_partitioned_by_job_type() -> None:
         location="s3://test-bucket/iceberg/records/",
         partition_key_names=PARTITION_KEY_NAMES,
     )
-    assert 'CREATE TABLE IF NOT EXISTS "test_db"."records_iceberg"' in sql
-    assert 'PARTITIONED BY ("job_type")' in sql
+    assert "CREATE TABLE IF NOT EXISTS test_db.records_iceberg" in sql
+    assert "PARTITIONED BY (job_type)" in sql
     assert "'table_type'='ICEBERG'" in sql
     assert "'format'='parquet'" in sql
     assert "LOCATION 's3://test-bucket/iceberg/records/'" in sql
-    assert '"year_month" string' in sql
-    assert '"rolled_up_at" timestamp' in sql
+    assert "year_month string" in sql
+    assert "rolled_up_at timestamp" in sql
 
 
 def _merge() -> str:
@@ -135,3 +135,20 @@ def test_reconcile_selects_missing_and_stale_keys_from_latest_report() -> None:
     assert (
         't."source_key" IS NULL OR inv."last_modified_date" > t."rolled_up_at"'
     ) in sql
+
+
+def test_create_table_sql_quotes_no_identifiers() -> None:
+    """Athena parses quoted-identifier DDL with a parser that lacks struct<...>.
+
+    A double quote anywhere in the statement makes the events column fail
+    with "mismatched input '<'", so the only quotes belong to the string
+    literals in LOCATION and TBLPROPERTIES.
+    """
+    sql = create_table_sql(
+        database="test_db",
+        table="records_iceberg",
+        location="s3://test-bucket/iceberg/records/",
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+    assert '"' not in sql
+    assert "array<struct<" in sql
