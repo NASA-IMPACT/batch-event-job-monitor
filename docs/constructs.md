@@ -117,7 +117,6 @@ RecordsRollupFunction(
     processing_bucket=processing.bucket,
     database_name="processing",
     iceberg_table=iceberg_table,
-    partition_keys=partition_keys,
 )
 ```
 
@@ -422,7 +421,7 @@ RecordsRollupFunction(
     processing_bucket=processing.bucket,  # concrete Bucket (not IBucket)
     database_name="processing",
     iceberg_table=iceberg,
-    partition_keys=partition_keys,
+    partition_keys=None,  # defaults to iceberg.partition_key_names
     workgroup_name=None,  # defaults to iceberg.workgroup_name
     max_keys_per_run=25000,
     max_chain_depth=1000,

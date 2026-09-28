@@ -340,9 +340,10 @@ class RecordsRollupFunction(Construct):
             # The default, TERMINATE, cuts a self-invoking chain off at 16
             # invocations, which would silently stall a backfill drain far
             # short of completion. ALLOW is only safe together with the
-            # other three compensating controls set here and in the
-            # handler: retry_attempts=0, reserved concurrency of 1, the
-            # max-depth counter, and the ChainDepth metric.
+            # other compensating controls set here and in the handler:
+            # retry_attempts=0, reserved concurrency of 1, the max-depth
+            # counter, and the RollupChainDepth and ReconcileChainDepth
+            # metrics.
             recursive_loop=lambda_.RecursiveLoop.ALLOW,
             retry_attempts=0,
         )
