@@ -219,6 +219,7 @@ class IcebergRecordsTable(Construct):
             self,
             "Workgroup",
             name=name,
+            recursive_delete_option=True,
             work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
                 result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
                     output_location=(
