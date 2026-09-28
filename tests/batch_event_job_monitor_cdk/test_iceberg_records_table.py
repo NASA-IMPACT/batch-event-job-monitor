@@ -110,6 +110,36 @@ def test_table_optimizer_is_enabled_for_compaction() -> None:
     )
 
 
+def test_table_optimizer_is_enabled_for_retention() -> None:
+    _template().has_resource_properties(
+        "AWS::Glue::TableOptimizer",
+        {
+            "Type": "retention",
+            "TableOptimizerConfiguration": Match.object_like({"Enabled": True}),
+        },
+    )
+
+
+def test_table_optimizer_is_enabled_for_orphan_file_deletion() -> None:
+    _template().has_resource_properties(
+        "AWS::Glue::TableOptimizer",
+        {
+            "Type": "orphan_file_deletion",
+            "TableOptimizerConfiguration": Match.object_like({"Enabled": True}),
+        },
+    )
+
+
+def test_all_three_table_optimizers_depend_on_the_ddl_resource() -> None:
+    template = _template()
+    optimizers = template.find_resources("AWS::Glue::TableOptimizer")
+    assert len(optimizers) == 3
+    ddl_resources = template.find_resources("Custom::IcebergRecordsTable")
+    (ddl_logical_id,) = ddl_resources.keys()
+    for optimizer in optimizers.values():
+        assert ddl_logical_id in optimizer["DependsOn"]
+
+
 def test_records_inventory_table_is_created() -> None:
     template = _template()
     template.resource_count_is("AWS::Glue::Table", 2)
@@ -163,6 +193,7 @@ def test_exposed_attributes_are_the_table_names_and_location() -> None:
     assert construct.inventory_location_s3path == INVENTORY_LOCATION
     assert construct.workgroup_name == "IcebergRecords-workgroup"
     assert construct.workgroup is not None
+    assert construct.partition_key_names == ["job_type", "tile_id"]
 
 
 def test_a_workgroup_is_created_with_results_under_the_processing_bucket() -> None:

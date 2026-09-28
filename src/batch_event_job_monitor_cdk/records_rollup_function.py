@@ -22,6 +22,7 @@ from aws_cdk import (
 from constructs import Construct
 
 from .iceberg_records_table import (
+    ATHENA_RESULTS_ACTIONS,
     ATHENA_RESULTS_PREFIX,
     ICEBERG_PREFIX,
     STAGING_PREFIX,
@@ -121,8 +122,14 @@ class RecordsRollupFunction(Construct):
         construct's default Athena workgroup (see ``workgroup_name``), and
         its ``inventory_location_s3path`` scopes the reconcile Lambda's
         read grant on the S3 Inventory data reconcile anti-joins against.
-    partition_keys : list[PartitionKeySpec]
+    partition_keys : list[PartitionKeySpec] or None, optional
         Ordered partition keys, including the leading job_type entry.
+        Defaults to ``iceberg_table.partition_key_names`` -- the same
+        partition keys the table's own MERGE and DDL were generated from,
+        so the two constructs cannot generate a MERGE referencing columns
+        the table does not have by drifting to two different lists. Pass
+        an explicit list only to deliberately diverge, which is never
+        correct in production.
     workgroup_name : str or None, optional
         Athena workgroup the rollup/reconcile Lambdas query through.
         Defaults to ``iceberg_table.workgroup_name`` -- the same workgroup
@@ -162,7 +169,7 @@ class RecordsRollupFunction(Construct):
         processing_bucket: s3.Bucket,
         database_name: str,
         iceberg_table: IcebergRecordsTable,
-        partition_keys: list[PartitionKeySpec],
+        partition_keys: list[PartitionKeySpec] | None = None,
         workgroup_name: str | None = None,
         rollup_schedule: events.Schedule | None = None,
         reconcile_schedule: events.Schedule | None = None,
@@ -177,6 +184,11 @@ class RecordsRollupFunction(Construct):
             if workgroup_name is not None
             else iceberg_table.workgroup_name
         )
+        partition_key_names = (
+            [key.name for key in partition_keys]
+            if partition_keys is not None
+            else iceberg_table.partition_key_names
+        )
 
         processing_bucket.enable_event_bridge_notification()
         processing_bucket.add_lifecycle_rule(
@@ -187,6 +199,10 @@ class RecordsRollupFunction(Construct):
         self.queue = sqs.Queue(
             self,
             "RollupQueue",
+            # Matches the DLQ's retention: a multi-million-key backfill
+            # drain can run longer than SQS's 4-day default, and a broken
+            # chain would otherwise let queued keys silently expire.
+            retention_period=Duration.days(14),
             visibility_timeout=_ROLLUP_TIMEOUT.plus(Duration.minutes(1)),
             dead_letter_queue=sqs.DeadLetterQueue(
                 max_receive_count=_DLQ_MAX_RECEIVE_COUNT, queue=self.dlq
@@ -216,7 +232,7 @@ class RecordsRollupFunction(Construct):
             "ROLLUP_STAGING_TABLE": iceberg_table.staging_table_name,
             "ROLLUP_INVENTORY_TABLE": iceberg_table.inventory_table_name,
             "ROLLUP_WORKGROUP": resolved_workgroup_name,
-            "ROLLUP_PARTITION_KEY_NAMES": ",".join(key.name for key in partition_keys),
+            "ROLLUP_PARTITION_KEY_NAMES": ",".join(partition_key_names),
             "ROLLUP_MAX_KEYS": str(max_keys_per_run),
             "ROLLUP_MAX_DEPTH": str(max_chain_depth),
         }
@@ -401,9 +417,13 @@ class RecordsRollupFunction(Construct):
         function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
-                resources=list(
-                    dict.fromkeys(iceberg_data_resources + athena_results_resources)
-                ),
+                resources=iceberg_data_resources,
+            )
+        )
+        function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=ATHENA_RESULTS_ACTIONS,
+                resources=athena_results_resources,
             )
         )
         function.add_to_role_policy(
@@ -412,6 +432,7 @@ class RecordsRollupFunction(Construct):
                     "athena:StartQueryExecution",
                     "athena:GetQueryExecution",
                     "athena:GetQueryResults",
+                    "athena:GetWorkGroup",
                 ],
                 resources=[workgroup_arn],
             )
@@ -459,6 +480,15 @@ class RecordsRollupFunction(Construct):
         """
         function.add_to_role_policy(
             iam.PolicyStatement(
+                # s3:ListBucket here is bucket-wide, not scoped to the
+                # Iceberg data prefix, because reconcile_sql's anti-join
+                # reads the records/ S3 Inventory through
+                # SymlinkTextInputFormat, which needs Athena to LIST the
+                # inventory prefix -- a prefix outside iceberg_data_resources
+                # and not otherwise covered by inventory_resource, which
+                # only grants GetObject. Scoping this down would break
+                # reconcile with an Access Denied that does not point at
+                # this cause.
                 actions=["s3:GetObject", "s3:ListBucket"],
                 resources=iceberg_data_resources,
             )
@@ -471,7 +501,7 @@ class RecordsRollupFunction(Construct):
         )
         function.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+                actions=ATHENA_RESULTS_ACTIONS,
                 resources=athena_results_resources,
             )
         )
@@ -481,6 +511,7 @@ class RecordsRollupFunction(Construct):
                     "athena:StartQueryExecution",
                     "athena:GetQueryExecution",
                     "athena:GetQueryResults",
+                    "athena:GetWorkGroup",
                 ],
                 resources=[workgroup_arn],
             )

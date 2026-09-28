@@ -133,6 +133,19 @@ def test_queue_visibility_exceeds_the_rollup_timeout() -> None:
     )
 
 
+def test_queue_retention_matches_the_dead_letter_queues() -> None:
+    # SQS's 4-day default is shorter than a multi-million-key backfill
+    # drain can run; without matching the DLQ's 14 days a broken chain
+    # would silently expire queued keys.
+    template = _template()
+    queues = template.find_resources("AWS::SQS::Queue")
+    retentions = {
+        resource["Properties"].get("MessageRetentionPeriod")
+        for resource in queues.values()
+    }
+    assert retentions == {14 * 24 * 60 * 60}
+
+
 def test_dead_letter_queue_is_wired_with_a_receive_count() -> None:
     _template().has_resource_properties(
         "AWS::SQS::Queue",
@@ -168,6 +181,53 @@ def test_rollup_is_scheduled_hourly_and_reconcile_weekly() -> None:
         "AWS::Events::Rule",
         Match.object_like({"ScheduleExpression": "rate(7 days)"}),
     )
+
+
+def test_rollup_partition_keys_default_to_the_iceberg_tables_own() -> None:
+    # A caller who omits partition_keys entirely still gets a MERGE
+    # referencing exactly the table's own columns, rather than a rollup
+    # function silently pointed at a table it disagrees with.
+    app = App()
+    stack = Stack(app, "TestStack")
+    bucket = s3.Bucket(stack, "ProcessingBucket", bucket_name="test-bucket")
+    database = glue.CfnDatabase(
+        stack,
+        "TestDatabase",
+        catalog_id="123456789012",
+        database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
+    )
+    table = IcebergRecordsTable(
+        stack,
+        "IcebergRecords",
+        database=database,
+        database_name="test_db",
+        processing_bucket_name="test-bucket",
+        records_inventory_location_s3path=INVENTORY_LOCATION,
+        inventory_datetime_start=dt.datetime(2026, 1, 1, 1, 0),
+        partition_keys=PARTITION_KEYS,
+    )
+    RecordsRollupFunction(
+        stack,
+        "Rollup",
+        processing_bucket=bucket,
+        database_name="test_db",
+        iceberg_table=table,
+    )
+    template = Template.from_stack(stack)
+    functions = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Handler": ("batch_event_job_monitor.handlers.rollup_handler.handler")
+            }
+        },
+    )
+    checked = 0
+    for resource in functions.values():
+        variables = resource["Properties"]["Environment"]["Variables"]
+        assert variables["ROLLUP_PARTITION_KEY_NAMES"] == "job_type,tile_id"
+        checked += 1
+    assert checked == 2
 
 
 def test_construct_exposes_the_required_attributes() -> None:
@@ -254,6 +314,42 @@ def test_rollup_function_can_read_staging_for_the_athena_merge() -> None:
     # GetObject here every MERGE fails with Access Denied.
     statements = _rollup_policy_statements()
     assert _statement_touching(statements, "s3:GetObject", "staging/*") is not None
+
+
+_ATHENA_RESULTS_ACTIONS = {
+    "s3:GetObject",
+    "s3:PutObject",
+    "s3:DeleteObject",
+    "s3:ListBucket",
+    "s3:GetBucketLocation",
+    "s3:AbortMultipartUpload",
+    "s3:ListBucketMultipartUploads",
+    "s3:ListMultipartUploadParts",
+}
+
+
+def test_rollup_function_athena_results_grant_matches_the_ddl_functions() -> None:
+    statements = _rollup_policy_statements()
+    statement = _statement_touching(
+        statements, "s3:GetBucketLocation", "athena-results/"
+    )
+    assert statement is not None
+    assert set(statement["Action"]) == _ATHENA_RESULTS_ACTIONS
+
+
+def test_reconcile_function_athena_results_grant_matches_the_ddl_functions() -> None:
+    statements = _reconcile_policy_statements()
+    statement = _statement_touching(
+        statements, "s3:GetBucketLocation", "athena-results/"
+    )
+    assert statement is not None
+    assert set(statement["Action"]) == _ATHENA_RESULTS_ACTIONS
+
+
+def test_both_functions_can_get_the_athena_workgroup() -> None:
+    for statements in (_rollup_policy_statements(), _reconcile_policy_statements()):
+        statement = _statement_touching(statements, "athena:GetWorkGroup", "workgroup/")
+        assert statement is not None
 
 
 def _inventory_grant_resource() -> str:

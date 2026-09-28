@@ -39,6 +39,23 @@ ICEBERG_PREFIX = "iceberg/records/"
 STAGING_PREFIX = "staging/"
 ATHENA_RESULTS_PREFIX = "athena-results/"
 
+# Athena's documented minimum grant for a query-results location. Shared by
+# every function that queries through this table's workgroup -- the DDL
+# Lambda, and the rollup/reconcile Lambdas in RecordsRollupFunction --
+# because they all read and write the same results prefix. The multipart
+# actions matter only once a result file crosses the multipart threshold, so
+# omitting them looks harmless until a large backfill run hits it.
+ATHENA_RESULTS_ACTIONS = [
+    "s3:GetObject",
+    "s3:PutObject",
+    "s3:DeleteObject",
+    "s3:ListBucket",
+    "s3:GetBucketLocation",
+    "s3:AbortMultipartUpload",
+    "s3:ListBucketMultipartUploads",
+    "s3:ListMultipartUploadParts",
+]
+
 
 class IcebergRecordsTable(Construct):
     """Iceberg records table, its staging table, and its inventory table.
@@ -92,6 +109,13 @@ class IcebergRecordsTable(Construct):
         Name of the staging table.
     inventory_table_name : str
         Name of the inventory table.
+    partition_key_names : list[str]
+        Ordered partition key names, job_type first -- the names extracted
+        from the ``partition_keys`` given at construction. Read by
+        RecordsRollupFunction to default its own partition key list, so
+        both constructs' generated SQL agrees on the natural key by
+        construction rather than by two callers coincidentally passing
+        matching lists.
     table_location : str
         s3:// URI of the Iceberg table's data location.
     inventory_location_s3path : str
@@ -136,6 +160,7 @@ class IcebergRecordsTable(Construct):
         )
 
         partition_key_names = [key.name for key in partition_keys]
+        self.partition_key_names = partition_key_names
 
         self.inventory_table = create_inventory_table(
             self,
@@ -292,20 +317,10 @@ class IcebergRecordsTable(Construct):
         )
         ddl_function.add_to_role_policy(
             iam.PolicyStatement(
-                # Matches Athena's documented minimum grant for a
-                # query-results location; DeleteObject is additionally
-                # required because Athena's Iceberg DROP TABLE deletes the
-                # table's data and metadata files in S3.
-                actions=[
-                    "s3:GetObject",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                    "s3:ListBucket",
-                    "s3:GetBucketLocation",
-                    "s3:AbortMultipartUpload",
-                    "s3:ListBucketMultipartUploads",
-                    "s3:ListMultipartUploadParts",
-                ],
+                # DeleteObject is additionally required here because
+                # Athena's Iceberg DROP TABLE deletes the table's data and
+                # metadata files in S3.
+                actions=ATHENA_RESULTS_ACTIONS,
                 resources=[
                     f"arn:aws:s3:::{processing_bucket_name}",
                     f"arn:aws:s3:::{processing_bucket_name}/*",
@@ -369,21 +384,26 @@ class IcebergRecordsTable(Construct):
             )
         )
 
-        optimizer = glue.CfnTableOptimizer(
-            self,
-            "CompactionOptimizer",
-            catalog_id=Aws.ACCOUNT_ID,
-            database_name=database_name,
-            table_name=self.iceberg_table_name,
-            type="compaction",
-            table_optimizer_configuration=(
-                glue.CfnTableOptimizer.TableOptimizerConfigurationProperty(
-                    enabled=True,
-                    role_arn=optimizer_role.role_arn,
-                )
-            ),
-        )
-        optimizer.node.add_dependency(self.ddl_resource)
+        for construct_id, optimizer_type in (
+            ("CompactionOptimizer", "compaction"),
+            ("RetentionOptimizer", "retention"),
+            ("OrphanFileDeletionOptimizer", "orphan_file_deletion"),
+        ):
+            optimizer = glue.CfnTableOptimizer(
+                self,
+                construct_id,
+                catalog_id=Aws.ACCOUNT_ID,
+                database_name=database_name,
+                table_name=self.iceberg_table_name,
+                type=optimizer_type,
+                table_optimizer_configuration=(
+                    glue.CfnTableOptimizer.TableOptimizerConfigurationProperty(
+                        enabled=True,
+                        role_arn=optimizer_role.role_arn,
+                    )
+                ),
+            )
+            optimizer.node.add_dependency(self.ddl_resource)
 
     @staticmethod
     def _glue_table_arns(*, database_name: str, table_name: str) -> list[str]:
