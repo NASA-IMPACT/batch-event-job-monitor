@@ -22,6 +22,7 @@ _BODY_COLUMNS: list[tuple[str, str]] = [
     ("batch_job_id", "string"),
     ("current_state", "string"),
     ("events", EVENTS_TYPE),
+    ("log_stream_name", "string"),
 ]
 
 

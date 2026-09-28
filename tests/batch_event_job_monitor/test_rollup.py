@@ -54,6 +54,7 @@ def _body() -> dict[str, Any]:
         "attempt": 1,
         "batch_job_id": "abc-123",
         "current_state": "SUCCESS",
+        "log_stream_name": "job/default/abc123",
         "events": [
             {"state": "SUBMITTED", "timestamp": "2026-09-22T10:00:00+00:00"},
             {
@@ -89,6 +90,22 @@ def test_row_carries_source_key_and_preserves_events_verbatim() -> None:
     )
     assert row["source_key"] == SOURCE_KEY
     assert row["events"] == body["events"]
+
+
+def test_row_carries_the_log_stream_name() -> None:
+    row = record_to_row(
+        source_key=SOURCE_KEY, body=_body(), partition_key_names=PARTITION_KEY_NAMES
+    )
+    assert row["log_stream_name"] == "job/default/abc123"
+
+
+def test_row_tolerates_a_record_written_before_log_streams_were_recorded() -> None:
+    body = _body()
+    del body["log_stream_name"]
+    row = record_to_row(
+        source_key=SOURCE_KEY, body=body, partition_key_names=PARTITION_KEY_NAMES
+    )
+    assert row["log_stream_name"] is None
 
 
 def test_row_tolerates_events_missing_optional_fields() -> None:

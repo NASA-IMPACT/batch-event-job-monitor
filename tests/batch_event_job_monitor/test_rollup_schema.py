@@ -70,3 +70,10 @@ def test_create_table_sql_quotes_no_identifiers() -> None:
     )
     assert '"' not in sql
     assert "array<struct<" in sql
+
+
+def test_log_stream_name_is_declared_on_both_tables() -> None:
+    iceberg = dict(iceberg_columns(PARTITION_KEY_NAMES))
+    staging = dict(staging_columns(PARTITION_KEY_NAMES))
+    assert iceberg["log_stream_name"] == "string"
+    assert staging["log_stream_name"] == "string"

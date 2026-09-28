@@ -78,6 +78,28 @@ class JobDetails:
         return None
 
     @property
+    def log_stream_name(self) -> str | None:
+        """CloudWatch log stream, checking the top level then the last attempt.
+
+        None until a container starts: a job that fails while queueing, or on
+        a bad job definition, never gets a log stream and may carry no
+        attempts at all.
+        """
+        container = self._typed_raw.get("container")
+        if container is not None:
+            log_stream_name = container.get("logStreamName")
+            if log_stream_name is not None:
+                return log_stream_name
+
+        attempts = self._typed_raw.get("attempts")
+        if attempts:
+            last_container = attempts[-1].get("container")
+            if last_container is not None:
+                return last_container.get("logStreamName")
+
+        return None
+
+    @property
     def status_reason(self) -> str | None:
         """Status reason, checking the top level then the last attempt."""
         status_reason = self._typed_raw.get("statusReason")
