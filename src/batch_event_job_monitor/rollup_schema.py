@@ -143,8 +143,17 @@ class InvalidRunId(ValueError):
 
 def _staging_expression(name: str) -> str:
     if name == "last_event_timestamp":
-        return 'from_iso8601_timestamp(s."last_event_timestamp")'
+        # The Iceberg column is a plain (zone-naive) timestamp, but
+        # from_iso8601_timestamp() returns timestamp(3) with time zone.
+        # Trino coerces naive -> zoned implicitly, not the reverse, so the
+        # explicit CAST is required for this assignment to type-check.
+        return 'CAST(from_iso8601_timestamp(s."last_event_timestamp") AS timestamp(6))'
     return f's."{name}"'
+
+
+# current_timestamp is timestamp(3) with time zone; rolled_up_at is a plain
+# (zone-naive) Iceberg column, so every assignment to it needs the same CAST.
+_ROLLED_UP_AT_EXPRESSION = "CAST(current_timestamp AS timestamp(6))"
 
 
 def merge_sql(
@@ -199,7 +208,9 @@ def merge_sql(
     insert_names = [name for name, _ in iceberg_columns(partition_key_names)]
     insert_columns = ", ".join(f'"{name}"' for name in insert_names)
     insert_values = ", ".join(
-        "current_timestamp" if name == "rolled_up_at" else _staging_expression(name)
+        _ROLLED_UP_AT_EXPRESSION
+        if name == "rolled_up_at"
+        else _staging_expression(name)
         for name in insert_names
     )
 
@@ -211,7 +222,7 @@ def merge_sql(
         f'WHEN MATCHED AND from_iso8601_timestamp(s."last_event_timestamp") '
         f'>= t."last_event_timestamp" THEN\n'
         f"    UPDATE SET {set_clause},\n"
-        f'               "rolled_up_at" = current_timestamp\n'
+        f'               "rolled_up_at" = {_ROLLED_UP_AT_EXPRESSION}\n'
         f"WHEN NOT MATCHED THEN\n"
         f"    INSERT ({insert_columns})\n"
         f"    VALUES ({insert_values})"

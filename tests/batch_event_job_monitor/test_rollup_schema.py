@@ -92,8 +92,22 @@ def test_merge_scopes_staging_to_the_run() -> None:
 
 def test_merge_sets_rolled_up_at_on_both_branches() -> None:
     sql = _merge()
-    assert '"rolled_up_at" = current_timestamp' in sql
-    assert "current_timestamp\n)" in sql or "current_timestamp)" in sql
+    assert '"rolled_up_at" = CAST(current_timestamp AS timestamp(6))' in sql
+    assert sql.count("CAST(current_timestamp AS timestamp(6))") == 2
+    assert "VALUES (" in sql
+    assert sql.rstrip().endswith("CAST(current_timestamp AS timestamp(6)))")
+
+
+def test_merge_casts_the_staged_timestamp_to_a_naive_timestamp() -> None:
+    # last_event_timestamp is a zone-naive Iceberg column, but
+    # from_iso8601_timestamp() returns a zoned timestamp; Trino only
+    # coerces naive -> zoned implicitly, not the reverse, so the
+    # assignment needs an explicit CAST to type-check.
+    sql = _merge()
+    assert (
+        '"last_event_timestamp" = CAST(from_iso8601_timestamp('
+        's."last_event_timestamp") AS timestamp(6))'
+    ) in sql
 
 
 def test_merge_rejects_a_run_id_that_is_not_a_uuid() -> None:
