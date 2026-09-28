@@ -15,6 +15,7 @@ from batch_event_job_monitor.rollup import (
     Clients,
     MalformedRecord,
     RollupConfig,
+    dedupe_rows_by_natural_key,
     drain_keys,
     fetch_rows,
     queue_has_messages,
@@ -32,7 +33,7 @@ _EXPECTED_METRIC_ENVELOPE = [
     {"Name": "MergeDurationMs", "Unit": "Milliseconds"},
     {"Name": "MissingSourceObjects", "Unit": "Count"},
     {"Name": "MalformedRecords", "Unit": "Count"},
-    {"Name": "ChainDepth", "Unit": "Count"},
+    {"Name": "RollupChainDepth", "Unit": "Count"},
     {"Name": "RollupFailures", "Unit": "Count"},
 ]
 
@@ -283,6 +284,55 @@ def test_staging_object_is_gzipped_ndjson(s3: S3Client, bucket: str) -> None:
     assert json.loads(lines[0])["tile_id"] == "12TVK"
 
 
+def _row(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "job_type": "monthly-composite",
+        "tile_id": "12TVK",
+        "year_month": "2024-06",
+        "input_entity_id": "12TVK_2024-06_source",
+        "attempt": 1,
+        "last_event_timestamp": "2026-09-22T10:00:00+00:00",
+        "source_key": "records/.../a.json",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_dedupe_keeps_a_single_row_per_natural_key() -> None:
+    rows = [_row(source_key="a"), _row(source_key="b")]
+
+    deduped = dedupe_rows_by_natural_key(rows, PARTITION_KEY_NAMES)
+
+    assert len(deduped) == 1
+
+
+def test_dedupe_keeps_the_row_with_the_newer_last_event_timestamp() -> None:
+    older = _row(
+        source_key="older",
+        last_event_timestamp="2026-09-22T10:00:00+00:00",
+    )
+    newer = _row(
+        source_key="newer",
+        last_event_timestamp="2026-09-22T10:05:00+00:00",
+    )
+
+    deduped = dedupe_rows_by_natural_key([older, newer], PARTITION_KEY_NAMES)
+
+    assert len(deduped) == 1
+    assert deduped[0]["source_key"] == "newer"
+
+    deduped_reversed = dedupe_rows_by_natural_key([newer, older], PARTITION_KEY_NAMES)
+    assert deduped_reversed[0]["source_key"] == "newer"
+
+
+def test_dedupe_leaves_distinct_natural_keys_untouched() -> None:
+    rows = [_row(attempt=1), _row(attempt=2)]
+
+    deduped = dedupe_rows_by_natural_key(rows, PARTITION_KEY_NAMES)
+
+    assert len(deduped) == 2
+
+
 class FakeAthena:
     """Minimal Athena client returning a scripted sequence of states."""
 
@@ -384,6 +434,42 @@ def test_rollup_merges_and_deletes_messages_on_success(
     )["Attributes"]
     assert int(attributes["ApproximateNumberOfMessagesNotVisible"]) == 0
     assert lambda_.invocations == []
+
+
+def test_rollup_collapses_objects_that_share_a_natural_key(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    # Two distinct S3 keys (an extra path segment not in PARTITION_KEY_NAMES)
+    # flattening to the same natural key -- the scenario drain_keys' S3-key
+    # dedup does not catch, since it operates before the object body (and
+    # therefore the natural key) is ever read.
+    key_older = (
+        "records/job_type=monthly-composite/tile_id=12TVK/year_month=2024-06/"
+        "extra=x/input_entity_id=12TVK_2024-06_source/001.json"
+    )
+    key_newer = (
+        "records/job_type=monthly-composite/tile_id=12TVK/year_month=2024-06/"
+        "extra=y/input_entity_id=12TVK_2024-06_source/001.json"
+    )
+    older = _body()
+    older["events"][-1]["timestamp"] = "2026-09-22T10:00:00+00:00"
+    newer = _body()
+    newer["events"][-1]["timestamp"] = "2026-09-22T10:05:00+00:00"
+    newer["current_state"] = "NEWER"
+    _put_record(s3, bucket, key_older, older)
+    _put_record(s3, bucket, key_newer, newer)
+    _send(sqs, rollup_queue_url, key_older)
+    _send(sqs, rollup_queue_url, key_newer)
+
+    metrics = run_rollup(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(
+            s3=s3, sqs=sqs, athena=FakeAthena(["SUCCEEDED"]), lambda_=FakeLambda()
+        ),
+        depth=0,
+    )
+
+    assert metrics["RolledUpRecords"] == 1
 
 
 def test_rollup_retains_messages_when_the_merge_fails(
@@ -602,10 +688,13 @@ def test_reconcile_enqueues_keys_and_skips_the_header_row(
     metrics = run_reconcile(
         config=_config(bucket, rollup_queue_url),
         clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
-        depth=0,
+        depth=3,
     )
 
     assert metrics["ReconcileDrift"] == 2
+    # Distinct from the rollup chain's own depth metric, so one runaway
+    # chain's alarm does not get muddled by the other chain's normal depth.
+    assert metrics["ReconcileChainDepth"] == 3
     assert "LEFT JOIN" in athena.started[0]
     drained = drain_keys(sqs_client=sqs, queue_url=rollup_queue_url, max_keys=10)
     assert sorted(drained.keys) == ["records/a.json", "records/b.json"]
@@ -633,6 +722,45 @@ def test_reconcile_chains_when_the_time_budget_runs_out(
         "query_execution_id": "qid-1",
         "next_token": "token-2",
     }
+
+
+def test_reconcile_is_not_truncated_when_it_successfully_chains(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    athena = FakeAthenaResults(
+        ["SUCCEEDED"], [_page(["records/a.json"], "token-2", True)]
+    )
+
+    metrics = run_reconcile(
+        config=_config(bucket, rollup_queue_url),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=FakeLambda()),
+        depth=0,
+        time_remaining_ms=lambda: 1_000,
+    )
+
+    assert metrics["ReconcileTruncated"] == 0
+
+
+def test_reconcile_is_truncated_when_refused_at_max_depth(
+    s3: S3Client, bucket: str, sqs: SQSClient, rollup_queue_url: str
+) -> None:
+    # Rows remain (NextToken is set) but the chain is refused at
+    # max_depth, so this pass gave up rather than converged -- the
+    # distinction ReconcileTruncated exists to surface.
+    athena = FakeAthenaResults(
+        ["SUCCEEDED"], [_page(["records/a.json"], "token-2", True)]
+    )
+    lambda_ = FakeLambda()
+
+    metrics = run_reconcile(
+        config=_config(bucket, rollup_queue_url, max_depth=0),
+        clients=Clients(s3=s3, sqs=sqs, athena=athena, lambda_=lambda_),
+        depth=0,
+        time_remaining_ms=lambda: 1_000,
+    )
+
+    assert metrics["ReconcileTruncated"] == 1
+    assert lambda_.invocations == []
 
 
 def test_reconcile_continues_an_existing_result_without_a_new_query(

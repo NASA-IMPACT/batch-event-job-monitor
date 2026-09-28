@@ -372,7 +372,8 @@ Both Lambdas are created from a single handler asset with different payloads (`"
 limit. This construct opts out via `recursive_loop=RecursiveLoop.ALLOW` to support draining long queues and backfilling
 large drift. Four compensating controls make this opt-out defensible: (1) reserved concurrency of 1 ensures the chain
 cannot fan out; (2) async retries are set to 0 so failures stop the chain rather than retrying; (3) max-depth counter in
-the handler prevents infinite loops; (4) `ChainDepth` metric reports depth at each step to alarm on runaway chains.
+the handler prevents infinite loops; (4) `RollupChainDepth`/`ReconcileChainDepth` metrics report depth at each step to
+alarm on runaway chains.
 
 **Freshness for consumers:** Query `SELECT max(rolled_up_at) FROM {database}.{iceberg_table}` to get the timestamp of
 the most recent rolled-up record.
@@ -394,16 +395,23 @@ call, no CloudWatch IAM grant):
 
 - `RolledUpRecords`: records merged in this run
 - `MergeDurationMs`: merge operation runtime in milliseconds
-- `MissingSourceObjects`: source records/ objects Athena could not read
-- `MalformedRecords`: staging records that could not be parsed
+- `MissingSourceObjects`: `records/` objects the rollup Lambda's `GetObject` could not find (a 404, not an Athena error)
+- `MalformedRecords`: `records/` source objects that could not be parsed or flattened into a staging row
 - `ReconcileDrift`: distinct keys still missing from the catalog after this reconcile run (0 means fully reconciled)
-- `ChainDepth`: self-invocation chain depth (monitor to ensure it does not approach `max_chain_depth`)
-- `RollupFailures`: number of failed merge or reconcile operations
+- `RollupChainDepth`: rollup self-invocation chain depth (monitor to ensure it does not approach `max_chain_depth`)
+- `ReconcileChainDepth`: reconcile self-invocation chain depth (monitor to ensure it does not approach
+  `max_chain_depth`)
+- `ReconcileTruncated`: 1 when a reconcile chain was refused at `max_chain_depth` with rows still pending, 0 when it
+  converged or did not need to chain
+- `RollupFailures`: emitted only by the rollup path, 1 when the Athena MERGE raises `AthenaQueryError`
 
 **Alarms worth creating:** See `JobMonitorFunction` on how to alarm on metrics in this namespace.
 
 - `ReconcileDrift` sustained > 0: indicates unfinished backfill
-- `ChainDepth` approaching `max_chain_depth`: queue draining is getting long; may indicate a backlog
+- `ReconcileTruncated` > 0: a reconcile chain gave up at `max_chain_depth` with rows still pending, as distinct from one
+  that converged
+- `RollupChainDepth` / `ReconcileChainDepth` approaching `max_chain_depth`: queue draining is getting long; may indicate
+  a backlog
 - DLQ depth: poison messages queued for inspection
 - Queue message age: messages waiting for the next scheduled run
 

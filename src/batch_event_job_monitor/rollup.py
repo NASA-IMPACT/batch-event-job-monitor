@@ -17,7 +17,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from batch_event_job_monitor.rollup_schema import merge_sql, reconcile_sql
+from batch_event_job_monitor.rollup_schema import key_columns, merge_sql, reconcile_sql
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +277,46 @@ def fetch_rows(
             else:
                 result.rows.append(outcome)
     return result
+
+
+def dedupe_rows_by_natural_key(
+    rows: list[dict[str, Any]], partition_key_names: list[str]
+) -> list[dict[str, Any]]:
+    """Collapse rows sharing a natural key, keeping the newest by event time.
+
+    drain_keys deduplicates by S3 object key, but the MERGE joins on the
+    natural key (key_columns): partition_key_names plus input_entity_id plus
+    attempt, all read from the object body. Those coincide only when
+    partition_fields contains exactly the declared partition keys -- any
+    extra partition field is part of the S3 key but dropped from the
+    natural key, so two distinct objects can collapse to one target row.
+    Iceberg MERGE requires at most one source row per target row, so this
+    must run before the staging object is written.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Flattened staging rows, possibly repeating a natural key.
+    partition_key_names : list[str]
+        Ordered partition key names, job_type first.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One row per distinct natural key: the one with the greatest
+        last_event_timestamp. ISO 8601 timestamps sharing a fixed UTC
+        offset and digit width sort lexicographically in chronological
+        order, so no parsing is needed to compare them.
+    """
+    newest: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = tuple(row[name] for name in key_columns(partition_key_names))
+        current = newest.get(key)
+        if current is None or (
+            row["last_event_timestamp"] > current["last_event_timestamp"]
+        ):
+            newest[key] = row
+    return list(newest.values())
 
 
 def write_staging_object(
@@ -557,7 +597,7 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
         "MergeDurationMs": 0,
         "MissingSourceObjects": 0,
         "MalformedRecords": 0,
-        "ChainDepth": depth,
+        "RollupChainDepth": depth,
         "RollupFailures": 0,
     }
 
@@ -571,13 +611,16 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
     metrics["MalformedRecords"] = fetched.malformed
 
     if fetched.rows:
+        deduped_rows = dedupe_rows_by_natural_key(
+            fetched.rows, config.partition_key_names
+        )
         run_id = str(uuid.uuid4())
         staging_key = write_staging_object(
             s3_client=clients.s3,
             bucket=config.bucket,
             staging_prefix=config.staging_prefix,
             run_id=run_id,
-            rows=fetched.rows,
+            rows=deduped_rows,
         )
         sql = merge_sql(
             database=config.database,
@@ -600,7 +643,7 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
             raise
         metrics["MergeDurationMs"] = int((time.monotonic() - merge_start) * 1000)
         clients.s3.delete_object(Bucket=config.bucket, Key=staging_key)
-        metrics["RolledUpRecords"] = len(fetched.rows)
+        metrics["RolledUpRecords"] = len(deduped_rows)
 
     _delete_messages(
         sqs_client=clients.sqs,
@@ -689,12 +732,11 @@ def run_reconcile(
 
     # The header row only appears on a result set's first page. next_token
     # absent means this call is fetching page one, whether or not the query
-    # was just started here -- that is the only reliable signal, since a
-    # caller could in principle pass a query_execution_id without a
-    # next_token.
+    # was just started here.
     skip_header = next_token is None
 
     enqueued = 0
+    truncated = 0
     while True:
         kwargs: dict[str, Any] = {"QueryExecutionId": query_execution_id}
         if next_token is not None:
@@ -715,7 +757,7 @@ def run_reconcile(
         if next_token is None:
             break
         if time_remaining_ms() < RECONCILE_TIME_BUDGET_MS:
-            _chain(
+            chained = _chain(
                 config=config,
                 clients=clients,
                 mode="reconcile",
@@ -723,8 +765,16 @@ def run_reconcile(
                 query_execution_id=query_execution_id,
                 next_token=next_token,
             )
+            # _chain returns False only at max_depth: rows remain
+            # (next_token is not None) but nothing was invoked to enqueue
+            # them, so this pass gave up rather than converged.
+            truncated = 0 if chained else 1
             break
 
-    metrics = {"ReconcileDrift": enqueued, "ChainDepth": depth}
+    metrics = {
+        "ReconcileDrift": enqueued,
+        "ReconcileChainDepth": depth,
+        "ReconcileTruncated": truncated,
+    }
     emit_metrics(namespace=config.metric_namespace, metrics=metrics)
     return metrics
