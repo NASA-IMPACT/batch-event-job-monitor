@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 import boto3
+from botocore.config import Config
 
 from batch_event_job_monitor.rollup import (
     Clients,
@@ -20,8 +21,14 @@ from batch_event_job_monitor.rollup import (
 )
 from batch_event_job_monitor.untracked import DEFAULT_METRIC_NAMESPACE
 
+# fetch_rows' thread pool defaults to 32 workers; boto3's default connection
+# pool is 10, so without this every run above 10 in-flight GETs blocks
+# threads on pool checkout and urllib3 logs "Connection pool is full" on
+# every run at the per-run cap.
+_S3_CLIENT_CONFIG = Config(max_pool_connections=32)
+
 _clients = Clients(
-    s3=boto3.client("s3"),
+    s3=boto3.client("s3", config=_S3_CLIENT_CONFIG),
     sqs=boto3.client("sqs"),
     athena=boto3.client("athena"),
     lambda_=boto3.client("lambda"),

@@ -30,6 +30,13 @@ def environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(name, value)
 
 
+def test_s3_client_pool_matches_the_fetch_thread_pool() -> None:
+    # rollup.fetch_rows defaults to 32 worker threads; boto3's default
+    # connection pool of 10 would starve 22 of them.
+    config = rollup_handler._S3_CLIENT_CONFIG
+    assert config.max_pool_connections == 32  # type: ignore[attr-defined]
+
+
 def test_config_reads_every_setting_from_the_environment(environment: None) -> None:
     config = rollup_handler.config_from_environment()
     assert config.bucket == "test-processing"
@@ -67,6 +74,7 @@ def test_handler_dispatches_reconcile_with_continuation(
 
     monkeypatch.setattr(rollup_handler, "run_reconcile", mock_run_reconcile)
 
+    context = _context()
     rollup_handler.handler(
         {
             "mode": "reconcile",
@@ -74,12 +82,15 @@ def test_handler_dispatches_reconcile_with_continuation(
             "query_execution_id": "qid-1",
             "next_token": "token-2",
         },
-        _context(),
+        context,
     )
 
     assert captured["depth"] == 2
     assert captured["query_execution_id"] == "qid-1"
     assert captured["next_token"] == "token-2"
+    # Guards against a regression to the hardcoded 900s default, which
+    # would silently break reconcile chaining's time-budget check.
+    assert captured["time_remaining_ms"] == context.get_remaining_time_in_millis
 
 
 def test_handler_rejects_an_unknown_mode(environment: None) -> None:
