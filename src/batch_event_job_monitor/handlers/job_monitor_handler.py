@@ -61,7 +61,10 @@ def handler(event: EventBridgeEvent, context: Context) -> dict[str, str]:
     job_group = job.decode_job_group()
 
     config = _job_type_config(job_group.job_type)
-    log_store = S3RecordStore(bucket=os.environ["PROCESSING_BUCKET_NAME"])
+    log_store = S3RecordStore(
+        bucket=os.environ["PROCESSING_BUCKET_NAME"],
+        key_prefix=os.environ.get("PROCESSING_KEY_PREFIX", ""),
+    )
 
     new_state = monitor_job(
         detail=detail,

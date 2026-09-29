@@ -70,6 +70,9 @@ class RecordsRollupTable(Construct):
         Glue database every table is created in.
     database_name : str
         Literal name of ``database`` (not a CDK token).
+    key_prefix : str, optional
+        Parent prefix the rollup's own S3 prefixes sit under. Must match
+        the ProcessingBucket's own key_prefix. Defaults to "".
     processing_bucket_name : str
         Name of the bucket holding records/, staging/, and the Iceberg data.
     records_inventory_location_s3path : str
@@ -137,6 +140,7 @@ class RecordsRollupTable(Construct):
         database: glue.CfnDatabase,
         database_name: str,
         processing_bucket_name: str,
+        key_prefix: str = "",
         records_inventory_location_s3path: str,
         inventory_datetime_start: dt.datetime,
         partition_keys: list[PartitionKeySpec],
@@ -152,7 +156,14 @@ class RecordsRollupTable(Construct):
         self.table_name = table_name
         self.staging_table_name = staging_table_name
         self.inventory_table_name = inventory_table_name
-        self.table_location = f"s3://{processing_bucket_name}/{RECORDS_ROLLUP_PREFIX}"
+        self.key_prefix = (
+            f"{key_prefix}/"
+            if key_prefix and not key_prefix.endswith("/")
+            else key_prefix
+        )
+        self.table_location = (
+            f"s3://{processing_bucket_name}/{self.key_prefix}{RECORDS_ROLLUP_PREFIX}"
+        )
         self.inventory_location_s3path = records_inventory_location_s3path
 
         self.workgroup_name, self.workgroup = self._resolve_workgroup(
@@ -174,7 +185,7 @@ class RecordsRollupTable(Construct):
         self.staging_table = self._create_staging_table(
             database=database,
             table_name=staging_table_name,
-            location=f"s3://{processing_bucket_name}/{STAGING_PREFIX}",
+            location=f"s3://{processing_bucket_name}/{self.key_prefix}{STAGING_PREFIX}",
             partition_key_names=partition_key_names,
         )
 
@@ -223,7 +234,7 @@ class RecordsRollupTable(Construct):
             work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
                 result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
                     output_location=(
-                        f"s3://{processing_bucket_name}/{ATHENA_RESULTS_PREFIX}"
+                        f"s3://{processing_bucket_name}/{self.key_prefix}{ATHENA_RESULTS_PREFIX}"
                     ),
                 ),
             ),

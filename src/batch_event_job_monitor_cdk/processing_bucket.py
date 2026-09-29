@@ -47,8 +47,17 @@ class ProcessingBucket(Construct):
         accounts and regions. The suffix counts against S3's 63-character
         limit, leaving 37 characters for the prefix; aws-cdk-lib validates
         the prefix's length and character set.
+    key_prefix : str, optional
+        Parent prefix every BEJM key is written under -- records/, state/,
+        outputs/, the inventory reports, and the rollup's own prefixes --
+        so a bucket shared with consumer data keeps all of it in one
+        subtree. Defaults to "", putting them at the bucket root.
+        Normalized to end with a single "/" when non-empty. Every other
+        prefix this construct takes is relative to it. Changing it on a
+        live bucket orphans everything written under the old value.
     inventory_prefix : str
-        Common key prefix under which every inventory's reports are delivered.
+        Key prefix, relative to key_prefix, under which every inventory's
+        reports are delivered.
         S3 further namespaces each inventory's reports by inventory_id below
         this prefix, so a single lifecycle rule and a single resource-policy
         grant cover every inventory configured on the bucket.
@@ -94,6 +103,7 @@ class ProcessingBucket(Construct):
         *,
         bucket_name: str | None = None,
         bucket_name_prefix: str | None = None,
+        key_prefix: str = "",
         inventory_prefix: str,
         inventories: list[tuple[str, str]],
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
@@ -132,7 +142,12 @@ class ProcessingBucket(Construct):
             self.bucket_name = bucket_name
             name_props = {"bucket_name": bucket_name}
 
-        self.inventory_prefix = inventory_prefix
+        self.key_prefix = (
+            f"{key_prefix}/"
+            if key_prefix and not key_prefix.endswith("/")
+            else key_prefix
+        )
+        self.inventory_prefix = f"{self.key_prefix}{inventory_prefix}"
 
         self.bucket = s3.Bucket(
             self,
@@ -164,19 +179,19 @@ class ProcessingBucket(Construct):
         for inventory_id, objects_prefix in inventories:
             self._add_inventory(
                 destination=inventory_dest,
-                destination_prefix=inventory_prefix,
+                destination_prefix=self.inventory_prefix,
                 inventory_id=inventory_id,
-                objects_prefix=objects_prefix,
+                objects_prefix=f"{self.key_prefix}{objects_prefix}",
             )
 
         self.bucket.add_lifecycle_rule(
-            prefix=inventory_prefix,
+            prefix=self.inventory_prefix,
             expiration=Duration.days(14),
         )
         self.bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObject"],
-                resources=[self.bucket.arn_for_objects(f"{inventory_prefix}*")],
+                resources=[self.bucket.arn_for_objects(f"{self.inventory_prefix}*")],
                 principals=[iam.ServicePrincipal("s3.amazonaws.com")],
                 effect=iam.Effect.ALLOW,
             )

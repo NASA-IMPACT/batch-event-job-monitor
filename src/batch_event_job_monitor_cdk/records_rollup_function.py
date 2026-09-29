@@ -179,6 +179,7 @@ class RecordsRollupFunction(Construct):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        key_prefix = rollup_table.key_prefix
         resolved_workgroup_name = (
             workgroup_name
             if workgroup_name is not None
@@ -192,7 +193,7 @@ class RecordsRollupFunction(Construct):
 
         processing_bucket.enable_event_bridge_notification()
         processing_bucket.add_lifecycle_rule(
-            prefix=STAGING_PREFIX, expiration=_STAGING_EXPIRATION
+            prefix=f"{key_prefix}{STAGING_PREFIX}", expiration=_STAGING_EXPIRATION
         )
 
         self.dlq = sqs.Queue(self, "RollupDlq", retention_period=Duration.days(14))
@@ -217,7 +218,7 @@ class RecordsRollupFunction(Construct):
                 detail_type=["Object Created"],
                 detail={
                     "bucket": {"name": [processing_bucket.bucket_name]},
-                    "object": {"key": [{"prefix": RECORDS_PREFIX}]},
+                    "object": {"key": [{"prefix": f"{key_prefix}{RECORDS_PREFIX}"}]},
                 },
             ),
             targets=[targets.SqsQueue(self.queue)],
@@ -226,7 +227,7 @@ class RecordsRollupFunction(Construct):
         environment = {
             "PROCESSING_BUCKET_NAME": processing_bucket.bucket_name,
             "ROLLUP_QUEUE_URL": self.queue.queue_url,
-            "ROLLUP_STAGING_PREFIX": STAGING_PREFIX,
+            "ROLLUP_STAGING_PREFIX": f"{key_prefix}{STAGING_PREFIX}",
             "ROLLUP_DATABASE": database_name,
             "ROLLUP_RECORDS_TABLE": rollup_table.table_name,
             "ROLLUP_STAGING_TABLE": rollup_table.staging_table_name,
@@ -252,10 +253,13 @@ class RecordsRollupFunction(Construct):
             f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:database/{database_name}",
             f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:table/{database_name}/*",
         ]
-        table_data_resources = [bucket_arn, f"{bucket_arn}/{RECORDS_ROLLUP_PREFIX}*"]
+        table_data_resources = [
+            bucket_arn,
+            f"{bucket_arn}/{key_prefix}{RECORDS_ROLLUP_PREFIX}*",
+        ]
         athena_results_resources = [
             bucket_arn,
-            f"{bucket_arn}/{ATHENA_RESULTS_PREFIX}*",
+            f"{bucket_arn}/{key_prefix}{ATHENA_RESULTS_PREFIX}*",
         ]
         inventory_resource = _inventory_data_resource(
             rollup_table.inventory_location_s3path
@@ -266,6 +270,7 @@ class RecordsRollupFunction(Construct):
             bucket_arn=bucket_arn,
             workgroup_arn=workgroup_arn,
             glue_arns=glue_arns,
+            key_prefix=key_prefix,
             table_data_resources=table_data_resources,
             athena_results_resources=athena_results_resources,
         )
@@ -273,6 +278,7 @@ class RecordsRollupFunction(Construct):
             self.reconcile_function,
             workgroup_arn=workgroup_arn,
             glue_arns=glue_arns,
+            key_prefix=key_prefix,
             table_data_resources=table_data_resources,
             athena_results_resources=athena_results_resources,
             inventory_resource=inventory_resource,
@@ -377,6 +383,7 @@ class RecordsRollupFunction(Construct):
         bucket_arn: str,
         workgroup_arn: str,
         glue_arns: list[str],
+        key_prefix: str,
         table_data_resources: list[str],
         athena_results_resources: list[str],
     ) -> None:
@@ -392,6 +399,8 @@ class RecordsRollupFunction(Construct):
             ARN of the Athena workgroup rollup queries run through.
         glue_arns : list[str]
             Catalog/database/table ARNs for the rollup database.
+        key_prefix : str
+            Parent prefix every BEJM key sits under.
         table_data_resources : list[str]
             Bucket and object ARNs covering the Iceberg table's data
             location.
@@ -401,7 +410,7 @@ class RecordsRollupFunction(Construct):
         function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject"],
-                resources=[f"{bucket_arn}/{RECORDS_PREFIX}*"],
+                resources=[f"{bucket_arn}/{key_prefix}{RECORDS_PREFIX}*"],
             )
         )
         function.add_to_role_policy(
@@ -412,7 +421,7 @@ class RecordsRollupFunction(Construct):
                 # underlying data as the calling identity, not a separate
                 # service role.
                 actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-                resources=[f"{bucket_arn}/{STAGING_PREFIX}*"],
+                resources=[f"{bucket_arn}/{key_prefix}{STAGING_PREFIX}*"],
             )
         )
         function.add_to_role_policy(
@@ -451,6 +460,7 @@ class RecordsRollupFunction(Construct):
         *,
         workgroup_arn: str,
         glue_arns: list[str],
+        key_prefix: str,
         table_data_resources: list[str],
         athena_results_resources: list[str],
         inventory_resource: str,
@@ -469,6 +479,8 @@ class RecordsRollupFunction(Construct):
             ARN of the Athena workgroup reconcile queries run through.
         glue_arns : list[str]
             Catalog/database/table ARNs for the rollup database.
+        key_prefix : str
+            Parent prefix every BEJM key sits under.
         table_data_resources : list[str]
             Bucket and object ARNs covering the Iceberg table's data
             location.

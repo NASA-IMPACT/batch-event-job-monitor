@@ -58,6 +58,9 @@ class AthenaRecordsTable(Construct):
         Glue database the records table is created in.
     database_name : str
         Literal name of ``database`` (not a CDK token).
+    key_prefix : str, optional
+        Parent prefix the records/ prefix sits under. Must match the
+        ProcessingBucket's own key_prefix. Defaults to "".
     records_bucket_name : str
         Name of the bucket holding the ``records/`` prefix.
     partition_keys : list[PartitionKeySpec]
@@ -83,6 +86,7 @@ class AthenaRecordsTable(Construct):
         database: glue.CfnDatabase,
         database_name: str,
         records_bucket_name: str,
+        key_prefix: str = "",
         partition_keys: list[PartitionKeySpec],
         table_name: str,
         **kwargs: Any,
@@ -91,7 +95,7 @@ class AthenaRecordsTable(Construct):
 
         self.database = database
 
-        s3_location = f"s3://{records_bucket_name}/records/"
+        s3_location = f"s3://{records_bucket_name}/{key_prefix}records/"
         self.records_table = self._create_records_table(
             table_name=table_name,
             s3_location=s3_location,

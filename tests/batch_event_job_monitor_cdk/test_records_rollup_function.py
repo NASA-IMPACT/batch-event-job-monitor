@@ -66,7 +66,7 @@ def _template() -> Template:
     return template
 
 
-def _construct() -> tuple[RecordsRollupFunction, Template]:
+def _construct(key_prefix: str = "") -> tuple[RecordsRollupFunction, Template]:
     app = App()
     stack = Stack(app, "TestStack")
     bucket = s3.Bucket(stack, "ProcessingBucket", bucket_name="test-bucket")
@@ -82,6 +82,7 @@ def _construct() -> tuple[RecordsRollupFunction, Template]:
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
+        key_prefix=key_prefix,
         records_inventory_location_s3path=INVENTORY_LOCATION,
         inventory_datetime_start=dt.datetime(2026, 1, 1, 1, 0),
         partition_keys=PARTITION_KEYS,
@@ -499,3 +500,42 @@ def test_both_functions_can_invoke_themselves() -> None:
         resources = statement["Resource"]
         assert isinstance(resources, list)
         assert len(resources) == 2
+
+
+def test_key_prefix_reaches_the_event_filter_and_staging_rule() -> None:
+    _, template = _construct(key_prefix="bejm/")
+    template.has_resource_properties(
+        "AWS::Events::Rule",
+        Match.object_like(
+            {
+                "EventPattern": Match.object_like(
+                    {"detail": {"object": {"key": [{"prefix": "bejm/records/"}]}}}
+                )
+            }
+        ),
+    )
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {
+            "LifecycleConfiguration": Match.object_like(
+                {
+                    "Rules": Match.array_with(
+                        [Match.object_like({"Prefix": "bejm/staging/"})]
+                    )
+                }
+            )
+        },
+    )
+
+
+def test_key_prefix_reaches_the_staging_env_var() -> None:
+    _, template = _construct(key_prefix="bejm/")
+    functions = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Environment": {"Variables": {"ROLLUP_STAGING_PREFIX": "bejm/staging/"}}
+            }
+        },
+    )
+    assert len(functions) == 2

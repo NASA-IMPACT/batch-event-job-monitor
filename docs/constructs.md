@@ -126,6 +126,36 @@ The bucket the monitor writes canonical records, state pointers, and output-inde
 Inventory configuration per `(inventory_id, objects_prefix)` pair. `inventory_location(inventory_id)` gives you the
 `s3://` path of that inventory's Hive symlink manifests, which is what the state/outputs table constructs read.
 
+### Key prefix
+
+By default every BEJM key sits at the bucket root: `records/`, `state/`, `outputs/`, the inventory reports, and the
+rollup's `records-rollup/`, `staging/` and `athena-results/`. Pass `key_prefix` to put all of them under one parent, so
+a bucket shared with consumer data keeps this schema in a single subtree.
+
+```python
+ProcessingBucket(
+    self,
+    "Processing",
+    bucket_name_prefix="my-processing",
+    key_prefix="bejm/",
+    inventory_prefix="inventory/",
+    inventories=[("state", "state/"), ("outputs", "outputs/"), ("records", "records/")],
+)
+```
+
+Every other prefix is relative to it, so the inventories above cover `bejm/records/` and their reports land under
+`bejm/inventory/`. Hand the same value to every construct that builds an S3 location, event filter, IAM resource or
+lifecycle rule -- `JobMonitorFunction`, `AthenaRecordsTable` and `RecordsRollupTable` each take `key_prefix`, and
+`RecordsRollupFunction` reads it from the table construct it is given. A value without a trailing slash gets one.
+
+The default `""` leaves every key, and every synthesized template, exactly as it was.
+
+**Changing `key_prefix` on a live bucket orphans everything already written.** Records, state pointers and output index
+entries under the old prefix are not moved or deleted, and nothing reads them afterwards: the monitor writes new state
+under the new prefix, the Athena tables point at the new prefix, and reconcile sees an empty table. Treat it as a
+one-time decision made before the first deploy, or plan an explicit migration -- copy the objects, then re-run reconcile
+to rebuild the rolled-up table.
+
 ### Naming: global vs account regional namespace
 
 Exactly one of `bucket_name` or `bucket_name_prefix` is required.
