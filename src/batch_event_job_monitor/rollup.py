@@ -646,6 +646,7 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
                 athena_client=clients.athena,
                 sql=sql,
                 workgroup=config.workgroup,
+                database=config.database,
             )
         except AthenaQueryError:
             metrics["MergeDurationMs"] = int((time.monotonic() - merge_start) * 1000)
@@ -739,6 +740,7 @@ def run_reconcile(
                 inventory_table=config.inventory_table,
             ),
             workgroup=config.workgroup,
+            database=config.database,
         )
 
     # The header row only appears on a result set's first page. next_token
