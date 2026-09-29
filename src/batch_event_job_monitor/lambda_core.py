@@ -131,7 +131,10 @@ def monitor_job(
             exit_code=job.exit_code,
         )
         log_store.append_canonical_event(
-            context=context, event=event, batch_job_id=job.job_id
+            context=context,
+            event=event,
+            batch_job_id=job.job_id,
+            log_stream_name=job.log_stream_name,
         )
 
         # Monotonicity guard: EventBridge does not guarantee delivery

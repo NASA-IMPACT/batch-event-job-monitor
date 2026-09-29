@@ -134,6 +134,73 @@ class TestAppendCanonicalEvent:
         record = json.loads(resp["Body"].read())
         assert record["batch_job_id"] == "batch-job-123"
 
+    def test_stores_log_stream_name(self, store: S3RecordStore, s3: S3Client) -> None:
+        context = make_context()
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="RUNNING", timestamp="2024-01-15T00:00:00Z"
+            ),
+            log_stream_name="job/default/abc123",
+        )
+        key = S3RecordStore.canonical_key(context)
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["log_stream_name"] == "job/default/abc123"
+
+    def test_log_stream_name_keeps_the_most_recent_attempt(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        for state_name, stream in [
+            ("RUNNING", "job/default/spot-interrupted"),
+            ("RUNNING", "job/default/retried"),
+        ]:
+            store.append_canonical_event(
+                context=context,
+                event=ProcessingEventRecord(
+                    state=state_name, timestamp="2024-01-15T00:00:00Z"
+                ),
+                log_stream_name=stream,
+            )
+        key = S3RecordStore.canonical_key(context)
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["log_stream_name"] == "job/default/retried"
+
+    def test_log_stream_name_is_not_erased_by_a_later_event_without_one(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="RUNNING", timestamp="2024-01-15T00:00:00Z"
+            ),
+            log_stream_name="job/default/abc123",
+        )
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="SUCCEEDED", timestamp="2024-01-16T00:00:00Z"
+            ),
+        )
+        key = S3RecordStore.canonical_key(context)
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["log_stream_name"] == "job/default/abc123"
+
+    def test_log_stream_name_absent_from_every_event_stays_none(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="SUBMITTED", timestamp="2024-01-15T00:00:00Z"
+            ),
+        )
+        key = S3RecordStore.canonical_key(context)
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["log_stream_name"] is None
+
 
 class TestStatePointer:
     def test_write_and_read_pointer(self, store: S3RecordStore, s3: S3Client) -> None:

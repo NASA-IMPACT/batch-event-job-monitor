@@ -60,6 +60,31 @@ class TestProperties:
         )
         assert job_details.exit_code == 1
 
+    def test_log_stream_name_from_top_level_container(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(container={"logStreamName": "job/default/abc123"})
+        )
+        assert job_details.log_stream_name == "job/default/abc123"
+
+    def test_log_stream_name_falls_back_to_last_attempt(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                attempts=[
+                    {"container": {"logStreamName": "job/default/spot-interrupted"}},
+                    {"container": {"logStreamName": "job/default/retried"}},
+                ]
+            )
+        )
+        assert job_details.log_stream_name == "job/default/retried"
+
+    def test_log_stream_name_missing_returns_none(self) -> None:
+        job_details = JobDetails.from_event(make_detail())
+        assert job_details.log_stream_name is None
+
+    def test_log_stream_name_missing_from_attempt_container_returns_none(self) -> None:
+        job_details = JobDetails.from_event(make_detail(attempts=[{"container": {}}]))
+        assert job_details.log_stream_name is None
+
     def test_exit_code_missing_returns_none(self) -> None:
         job_details = JobDetails.from_event(make_detail())
         assert job_details.exit_code is None

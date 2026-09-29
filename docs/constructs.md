@@ -377,6 +377,12 @@ alarm on runaway chains.
 **Freshness for consumers:** Query `SELECT max(rolled_up_at) FROM {database}.{iceberg_table}` to get the timestamp of
 the most recent rolled-up record.
 
+**Finding job logs:** `log_stream_name` holds the CloudWatch log stream for the record's most recent Batch attempt, in
+the log group the job definition writes to (`/aws/batch/job` unless overridden). It outlives the Batch job itself, which
+`DescribeJobs` drops roughly 24 hours after completion, so it is the durable way back to a failed job's output. It is
+null for two reasons worth distinguishing: the job never started a container (a capacity failure or a bad job
+definition), or the record predates this column. A job retried internally by Batch keeps only its last attempt's stream.
+
 **Backfill:** To backfill changes, invoke the reconcile function via the AWS Lambda console or CLI (set payload to
 `{"mode": "reconcile", "depth": 0}`) and monitor the `ReconcileDrift` metric. When it reaches 0, all drift is
 reconciled. Reconcile against a cold table returns every key, so it is the backfill procedure.

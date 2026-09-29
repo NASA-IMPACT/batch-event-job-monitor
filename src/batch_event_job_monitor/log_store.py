@@ -137,6 +137,7 @@ class S3RecordStore:
         context: JobContext,
         event: ProcessingEventRecord,
         batch_job_id: str | None = None,
+        log_stream_name: str | None = None,
     ) -> None:
         """Append a state-transition event to the canonical record.
 
@@ -152,6 +153,10 @@ class S3RecordStore:
             The event to append.
         batch_job_id : str or None, optional
             The AWS Batch job id associated with this attempt.
+        log_stream_name : str or None, optional
+            CloudWatch log stream for the job's most recent Batch attempt.
+            Recorded only when present, so an event raised before a container
+            exists cannot erase a stream an earlier event already supplied.
         """
         key = self.canonical_key(context)
         record: dict[str, Any]
@@ -170,10 +175,13 @@ class S3RecordStore:
                 "batch_job_id": batch_job_id,
                 "events": [],
                 "current_state": event.state,
+                "log_stream_name": None,
             }
 
         record["events"].append(event.to_dict())
         record["current_state"] = event.state
+        if log_stream_name is not None:
+            record["log_stream_name"] = log_stream_name
 
         self.client.put_object(
             Bucket=self.bucket,
