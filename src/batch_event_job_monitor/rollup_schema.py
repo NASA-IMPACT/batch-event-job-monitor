@@ -42,7 +42,7 @@ def key_columns(partition_key_names: list[str]) -> list[str]:
     return [*partition_key_names, "input_entity_id", "attempt"]
 
 
-def iceberg_columns(partition_key_names: list[str]) -> list[tuple[str, str]]:
+def records_columns(partition_key_names: list[str]) -> list[tuple[str, str]]:
     """(name, Athena type) pairs for the Iceberg table, in declaration order.
 
     Parameters
@@ -118,13 +118,14 @@ def create_table_sql(
         A CREATE TABLE IF NOT EXISTS statement.
     """
     column_sql = ",\n".join(
-        f"{name} {col_type}" for name, col_type in iceberg_columns(partition_key_names)
+        f"`{name}` {col_type}"
+        for name, col_type in records_columns(partition_key_names)
     )
     return f"""
-        CREATE TABLE IF NOT EXISTS {database}.{table} (
+        CREATE TABLE IF NOT EXISTS `{database}`.`{table}` (
             {column_sql}
         )
-        PARTITIONED BY ({partition_key_names[0]})
+        PARTITIONED BY (`{partition_key_names[0]}`)
         LOCATION '{location}'
         TBLPROPERTIES ('table_type'='ICEBERG', 'format'='parquet')
     """
@@ -155,7 +156,7 @@ _ROLLED_UP_AT_EXPRESSION = "CAST(current_timestamp AS timestamp(6))"
 def merge_sql(
     *,
     database: str,
-    iceberg_table: str,
+    records_table: str,
     staging_table: str,
     run_id: str,
     partition_key_names: list[str],
@@ -166,7 +167,7 @@ def merge_sql(
     ----------
     database : str
         Glue database holding both tables.
-    iceberg_table : str
+    records_table : str
         Iceberg table name (the MERGE target).
     staging_table : str
         NDJSON staging table name (the MERGE source).
@@ -194,14 +195,14 @@ def merge_sql(
 
     updatable = [
         name
-        for name, _ in iceberg_columns(partition_key_names)
+        for name, _ in records_columns(partition_key_names)
         if name not in keys and name != "rolled_up_at"
     ]
     set_clause = ",\n".join(
         f'"{name}" = {_staging_expression(name)}' for name in updatable
     )
 
-    insert_names = [name for name, _ in iceberg_columns(partition_key_names)]
+    insert_names = [name for name, _ in records_columns(partition_key_names)]
     insert_columns = ", ".join(f'"{name}"' for name in insert_names)
     insert_values = ", ".join(
         _ROLLED_UP_AT_EXPRESSION
@@ -211,7 +212,7 @@ def merge_sql(
     )
 
     return f"""
-        MERGE INTO "{database}"."{iceberg_table}" t
+        MERGE INTO "{database}"."{records_table}" t
         USING (
             SELECT * FROM "{database}"."{staging_table}" WHERE run_id = '{run_id}'
         ) s
@@ -229,7 +230,7 @@ def merge_sql(
 def reconcile_sql(
     *,
     database: str,
-    iceberg_table: str,
+    records_table: str,
     inventory_table: str,
 ) -> str:
     """Build the query selecting keys missing from or stale in the table.
@@ -243,7 +244,7 @@ def reconcile_sql(
     ----------
     database : str
         Glue database holding both tables.
-    iceberg_table : str
+    records_table : str
         Iceberg table name.
     inventory_table : str
         S3-inventory table over the records/ prefix.
@@ -256,7 +257,7 @@ def reconcile_sql(
     return f"""
         SELECT inv."key" AS source_key
         FROM "{database}"."{inventory_table}" inv
-        LEFT JOIN "{database}"."{iceberg_table}" t
+        LEFT JOIN "{database}"."{records_table}" t
             ON t."source_key" = inv."key"
         WHERE inv."dt" = (SELECT max("dt") FROM "{database}"."{inventory_table}")
           AND inv."is_latest"

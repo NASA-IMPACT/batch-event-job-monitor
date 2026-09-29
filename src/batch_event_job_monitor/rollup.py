@@ -379,6 +379,7 @@ def run_query(
     athena_client: AthenaClient,
     sql: str,
     workgroup: str,
+    database: str | None = None,
     poll_seconds: float = 1.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
@@ -392,6 +393,11 @@ def run_query(
         Statement to execute.
     workgroup : str
         Athena workgroup, which supplies the result location.
+    database : str or None, optional
+        Database to resolve unqualified names against. Every statement
+        this package generates is already qualified, so this only makes
+        the context explicit rather than leaving Athena to resolve the
+        query against whatever default the workgroup carries.
     poll_seconds : float, optional
         Delay between status polls. Defaults to 1.0.
     sleep : Callable[[float], None], optional
@@ -407,9 +413,11 @@ def run_query(
     AthenaQueryError
         If the query ends in FAILED or CANCELLED.
     """
+    context = {"QueryExecutionContext": {"Database": database}} if database else {}
     query_id = athena_client.start_query_execution(
         QueryString=sql,
         WorkGroup=workgroup,
+        **context,  # type: ignore[arg-type]
     )["QueryExecutionId"]
 
     while True:
@@ -439,7 +447,7 @@ class RollupConfig:
         Key prefix for staging objects, with a trailing slash.
     database : str
         Glue database holding every table below.
-    iceberg_table : str
+    records_table : str
         Rolled-up Iceberg table name.
     staging_table : str
         NDJSON staging table name.
@@ -463,7 +471,7 @@ class RollupConfig:
     queue_url: str
     staging_prefix: str
     database: str
-    iceberg_table: str
+    records_table: str
     staging_table: str
     inventory_table: str
     workgroup: str
@@ -627,7 +635,7 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
         )
         sql = merge_sql(
             database=config.database,
-            iceberg_table=config.iceberg_table,
+            records_table=config.records_table,
             staging_table=config.staging_table,
             run_id=run_id,
             partition_key_names=config.partition_key_names,
@@ -638,6 +646,7 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
                 athena_client=clients.athena,
                 sql=sql,
                 workgroup=config.workgroup,
+                database=config.database,
             )
         except AthenaQueryError:
             metrics["MergeDurationMs"] = int((time.monotonic() - merge_start) * 1000)
@@ -727,10 +736,11 @@ def run_reconcile(
             athena_client=clients.athena,
             sql=reconcile_sql(
                 database=config.database,
-                iceberg_table=config.iceberg_table,
+                records_table=config.records_table,
                 inventory_table=config.inventory_table,
             ),
             workgroup=config.workgroup,
+            database=config.database,
         )
 
     # The header row only appears on a result set's first page. next_token

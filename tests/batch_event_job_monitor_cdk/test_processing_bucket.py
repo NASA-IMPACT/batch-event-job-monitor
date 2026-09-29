@@ -15,6 +15,7 @@ def _make_bucket(
     *,
     bucket_name: str = "test-processing-bucket",
     inventory_prefix: str = "inventory/",
+    key_prefix: str = "",
     inventories: list[tuple[str, str]] | None = None,
 ) -> tuple[Stack, ProcessingBucket]:
     app = App()
@@ -23,6 +24,7 @@ def _make_bucket(
         stack,
         "TestProcessingBucket",
         bucket_name=bucket_name,
+        key_prefix=key_prefix,
         inventory_prefix=inventory_prefix,
         inventories=inventories
         if inventories is not None
@@ -376,3 +378,59 @@ class TestBucketNamespace:
                 inventory_prefix="inventory/",
                 inventories=[("state", "state/")],
             )
+
+
+class TestKeyPrefix:
+    """Every prefix this construct owns is relative to key_prefix."""
+
+    def test_inventory_reports_and_filters_sit_under_the_prefix(self) -> None:
+        stack, construct = _make_bucket(key_prefix="bejm/")
+        template = Template.from_stack(stack)
+        assert construct.inventory_location("state") == (
+            "s3://test-processing-bucket/bejm/inventory/"
+            "test-processing-bucket/state/hive/"
+        )
+        template.has_resource_properties(
+            "AWS::S3::Bucket",
+            {
+                "InventoryConfigurations": Match.array_with(
+                    [
+                        Match.object_like(
+                            {
+                                "Id": "state",
+                                "Prefix": "bejm/state/",
+                                "Destination": Match.object_like(
+                                    {"Prefix": "bejm/inventory"}
+                                ),
+                            }
+                        )
+                    ]
+                )
+            },
+        )
+
+    def test_a_prefix_without_a_trailing_slash_is_normalized(self) -> None:
+        _, construct = _make_bucket(key_prefix="bejm")
+        assert construct.key_prefix == "bejm/"
+
+    def test_the_inventory_lifecycle_rule_targets_the_prefixed_reports(self) -> None:
+        stack, _ = _make_bucket(key_prefix="bejm/")
+        Template.from_stack(stack).has_resource_properties(
+            "AWS::S3::Bucket",
+            {
+                "LifecycleConfiguration": Match.object_like(
+                    {
+                        "Rules": Match.array_with(
+                            [
+                                Match.object_like(
+                                    {
+                                        "Prefix": "bejm/inventory/",
+                                        "ExpirationInDays": 14,
+                                    }
+                                )
+                            ]
+                        )
+                    }
+                )
+            },
+        )

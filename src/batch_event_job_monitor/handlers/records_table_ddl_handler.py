@@ -13,7 +13,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from batch_event_job_monitor.rollup import run_query
-from batch_event_job_monitor.rollup_schema import create_table_sql, iceberg_columns
+from batch_event_job_monitor.rollup_schema import create_table_sql, records_columns
 
 if TYPE_CHECKING:
     from mypy_boto3_glue import GlueClient
@@ -104,7 +104,7 @@ def added_column_sql(
             "manual migration required for incompatible columns: " + ", ".join(problems)
         )
     return [
-        f"ALTER TABLE {database}.{table} ADD COLUMNS ({name} {col_type})"
+        f"ALTER TABLE `{database}`.`{table}` ADD COLUMNS (`{name}` {col_type})"
         for name, col_type in new_columns
         if name not in old_by_name
     ]
@@ -166,6 +166,7 @@ def _run_create_table(
             partition_key_names=partition_key_names,
         ),
         workgroup=workgroup,
+        database=database,
     )
 
 
@@ -204,8 +205,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
         if properties.get("RemovalPolicy") == "destroy":
             run_query(
                 athena_client=_athena_client,
-                sql=f'DROP TABLE IF EXISTS "{database}"."{table}"',
+                sql=f"DROP TABLE IF EXISTS `{database}`.`{table}`",
                 workgroup=workgroup,
+                database=database,
             )
         return {"PhysicalResourceId": physical_id}
 
@@ -226,9 +228,14 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
             database=database,
             table=table,
             old_columns=old_columns,
-            new_columns=iceberg_columns(partition_key_names),
+            new_columns=records_columns(partition_key_names),
         ):
-            run_query(athena_client=_athena_client, sql=statement, workgroup=workgroup)
+            run_query(
+                athena_client=_athena_client,
+                sql=statement,
+                workgroup=workgroup,
+                database=database,
+            )
         return {"PhysicalResourceId": physical_id}
 
     _run_create_table(

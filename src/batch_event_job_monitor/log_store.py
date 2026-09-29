@@ -39,7 +39,7 @@ def _pointer_body(context: JobContext) -> bytes:
 class S3RecordStore:
     """Three-object S3 log schema.
 
-    Objects written per entity processing attempt:
+    Objects written per entity processing attempt, each under key_prefix:
 
     1. Canonical record (append-only events array):
        records/job_type={job_type}/{partition_fields...}/input_entity_id={input_entity_id}/{attempt:03d}.json
@@ -49,14 +49,31 @@ class S3RecordStore:
 
     3. Output index (empty body, terminal states only):
        outputs/state={STATE}/job_type={job_type}/{partition_fields...}/{output_entity_id}
+
+    Attributes
+    ----------
+    bucket : str
+        Processing bucket name.
+    key_prefix : str
+        Parent prefix every key is written under, so a bucket shared with
+        consumer data keeps this schema in one subtree. Defaults to "",
+        putting the three prefixes at the bucket root. Normalized to end
+        with a single "/" when non-empty. Changing it on a live bucket
+        orphans every record and state pointer written under the old value.
+    client : Any
+        Boto3 S3 client.
     """
 
     bucket: str
+    key_prefix: str = ""
     client: Any = field(default_factory=lambda: boto3.client("s3"))
 
+    def __post_init__(self) -> None:
+        if self.key_prefix and not self.key_prefix.endswith("/"):
+            self.key_prefix = f"{self.key_prefix}/"
+
     # -------------------- keys
-    @staticmethod
-    def canonical_key(context: JobContext) -> str:
+    def canonical_key(self, context: JobContext) -> str:
         """Build the canonical record key.
 
         Parameters
@@ -71,19 +88,19 @@ class S3RecordStore:
         """
         partition = _render_partition(context.partition_fields)
         return (
-            f"records/job_type={context.job_type}/{partition}"
+            f"{self.key_prefix}records/job_type={context.job_type}/{partition}"
             f"input_entity_id={context.input_entity_id}/{context.attempt:03d}.json"
         )
 
-    @staticmethod
     def _state_prefix(
-        state: ProcessingState, job_type: str, partition_fields: dict[str, str]
+        self, state: ProcessingState, job_type: str, partition_fields: dict[str, str]
     ) -> str:
         partition = _render_partition(partition_fields)
-        return f"state/state={state.name}/job_type={job_type}/{partition}"
+        return (
+            f"{self.key_prefix}state/state={state.name}/job_type={job_type}/{partition}"
+        )
 
-    @staticmethod
-    def state_pointer_key(state: ProcessingState, context: JobContext) -> str:
+    def state_pointer_key(self, state: ProcessingState, context: JobContext) -> str:
         """Build the state pointer key.
 
         Parameters
@@ -99,14 +116,11 @@ class S3RecordStore:
             The S3 key for the state pointer object.
         """
         return (
-            S3RecordStore._state_prefix(
-                state, context.job_type, context.partition_fields
-            )
+            self._state_prefix(state, context.job_type, context.partition_fields)
             + f"input_entity_id={context.input_entity_id}/{context.attempt:03d}"
         )
 
-    @staticmethod
-    def output_index_key(state: ProcessingState, context: JobContext) -> str:
+    def output_index_key(self, state: ProcessingState, context: JobContext) -> str:
         """Build the output index key.
 
         Parameters
@@ -126,7 +140,8 @@ class S3RecordStore:
         """
         partition = _render_partition(context.partition_fields)
         return (
-            f"outputs/state={state.name}/job_type={context.job_type}/"
+            f"{self.key_prefix}outputs/state={state.name}/"
+            f"job_type={context.job_type}/"
             f"{partition}{context.output_entity_id}"
         )
 

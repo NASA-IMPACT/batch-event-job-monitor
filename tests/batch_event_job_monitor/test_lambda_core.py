@@ -80,8 +80,10 @@ def _receive_all(sqs: SQSClient, queue_url: str) -> list[MessageTypeDef]:
     return resp.get("Messages", [])
 
 
-def _output_index_exists(s3: S3Client, bucket: str, state: ProcessingState) -> bool:
-    key = S3RecordStore.output_index_key(state, CONTEXT)
+def _output_index_exists(
+    s3: S3Client, bucket: str, store: S3RecordStore, state: ProcessingState
+) -> bool:
+    key = store.output_index_key(state, CONTEXT)
     resp = s3.list_objects_v2(Bucket=bucket, Prefix=key)
     return resp.get("KeyCount", 0) == 1
 
@@ -127,7 +129,7 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert _output_index_exists(s3, bucket, ProcessingStates.SUCCESS)
+        assert _output_index_exists(s3, bucket, store, ProcessingStates.SUCCESS)
 
     def test_no_sqs_messages_sent(
         self,
@@ -169,7 +171,7 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        key = S3RecordStore.canonical_key(CONTEXT)
+        key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert record["current_state"] == "SUCCESS"
@@ -199,15 +201,13 @@ class TestSuccessPath:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        success_key = S3RecordStore.state_pointer_key(ProcessingStates.SUCCESS, CONTEXT)
+        success_key = store.state_pointer_key(ProcessingStates.SUCCESS, CONTEXT)
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=success_key).get("KeyCount", 0)
             == 1
         )
 
-        awaiting_key = S3RecordStore.state_pointer_key(
-            ProcessingStates.AWAITING, CONTEXT
-        )
+        awaiting_key = store.state_pointer_key(ProcessingStates.AWAITING, CONTEXT)
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=awaiting_key).get("KeyCount", 0)
             == 0
@@ -271,7 +271,9 @@ class TestFailureRetryableWithAttemptsRemaining:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        assert not _output_index_exists(s3, bucket, ProcessingStates.FAILURE_RETRYABLE)
+        assert not _output_index_exists(
+            s3, bucket, store, ProcessingStates.FAILURE_RETRYABLE
+        )
 
     def test_no_retry_queue_url_sends_nothing(
         self,
@@ -324,7 +326,9 @@ class TestFailureRetryableAttemptsExhausted:
             now=_fixed_now,
         )
         assert result is ProcessingStates.FAILURE_RETRYABLE
-        assert _output_index_exists(s3, bucket, ProcessingStates.FAILURE_RETRYABLE)
+        assert _output_index_exists(
+            s3, bucket, store, ProcessingStates.FAILURE_RETRYABLE
+        )
 
         assert _receive_all(sqs, retry_queue_url) == []
         dlq_messages = _receive_all(sqs, dlq_url)
@@ -360,7 +364,9 @@ class TestFailureNonretryable:
             now=_fixed_now,
         )
         assert result is ProcessingStates.FAILURE_NONRETRYABLE
-        assert _output_index_exists(s3, bucket, ProcessingStates.FAILURE_NONRETRYABLE)
+        assert _output_index_exists(
+            s3, bucket, store, ProcessingStates.FAILURE_NONRETRYABLE
+        )
 
         assert _receive_all(sqs, retry_queue_url) == []
         dlq_messages = _receive_all(sqs, dlq_url)
@@ -417,7 +423,7 @@ class TestDefaultNow:
         )
         after = datetime.now(timezone.utc)
 
-        key = S3RecordStore.canonical_key(CONTEXT)
+        key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         timestamp = datetime.fromisoformat(record["events"][0]["timestamp"])
@@ -453,9 +459,7 @@ class TestFullLifecycle:
         assert (
             s3.list_objects_v2(
                 Bucket=bucket,
-                Prefix=S3RecordStore.state_pointer_key(
-                    ProcessingStates.SUBMITTED, CONTEXT
-                ),
+                Prefix=store.state_pointer_key(ProcessingStates.SUBMITTED, CONTEXT),
             ).get("KeyCount", 0)
             == 1
         )
@@ -465,27 +469,23 @@ class TestFullLifecycle:
         assert (
             s3.list_objects_v2(
                 Bucket=bucket,
-                Prefix=S3RecordStore.state_pointer_key(
-                    ProcessingStates.SUBMITTED, CONTEXT
-                ),
+                Prefix=store.state_pointer_key(ProcessingStates.SUBMITTED, CONTEXT),
             ).get("KeyCount", 0)
             == 0
         )
         assert (
             s3.list_objects_v2(
                 Bucket=bucket,
-                Prefix=S3RecordStore.state_pointer_key(
-                    ProcessingStates.AWAITING, CONTEXT
-                ),
+                Prefix=store.state_pointer_key(ProcessingStates.AWAITING, CONTEXT),
             ).get("KeyCount", 0)
             == 1
         )
 
         success = monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
         assert success is ProcessingStates.SUCCESS
-        assert _output_index_exists(s3, bucket, ProcessingStates.SUCCESS)
+        assert _output_index_exists(s3, bucket, store, ProcessingStates.SUCCESS)
 
-        key = S3RecordStore.canonical_key(CONTEXT)
+        key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert [e["state"] for e in record["events"]] == [
@@ -547,7 +547,7 @@ class TestFullLifecycle:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        old_key = S3RecordStore.state_pointer_key(
+        old_key = store.state_pointer_key(
             ProcessingStates.FAILURE_RETRYABLE, old_context
         )
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 1
@@ -566,9 +566,7 @@ class TestFullLifecycle:
         )
         assert result is ProcessingStates.SUBMITTED
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 0
-        new_key = S3RecordStore.state_pointer_key(
-            ProcessingStates.SUBMITTED, new_context
-        )
+        new_key = store.state_pointer_key(ProcessingStates.SUBMITTED, new_context)
         assert s3.list_objects_v2(Bucket=bucket, Prefix=new_key).get("KeyCount", 0) == 1
 
 
@@ -601,7 +599,7 @@ class TestMonotonicityGuard:
 
         assert store.find_state_pointer(context=CONTEXT) is ProcessingStates.SUCCESS
 
-        key = S3RecordStore.canonical_key(CONTEXT)
+        key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert [e["state"] for e in record["events"]] == ["SUCCESS", "SUBMITTED"]
@@ -652,7 +650,7 @@ class TestMonotonicityGuard:
         assert store.find_state_pointer(context=context_2) is ProcessingStates.SUBMITTED
         assert _receive_all(sqs, retry_queue_url) == []
 
-        key = S3RecordStore.canonical_key(context_1)
+        key = store.canonical_key(context_1)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert [e["state"] for e in record["events"]] == [
@@ -714,23 +712,17 @@ class TestMultiEntityGroup:
         )
 
         for context in (self.CONTEXT_A, self.CONTEXT_B):
-            resp = s3.get_object(
-                Bucket=bucket, Key=S3RecordStore.canonical_key(context)
-            )
+            resp = s3.get_object(Bucket=bucket, Key=store.canonical_key(context))
             record = json.loads(resp["Body"].read())
             assert record["current_state"] == "SUCCESS"
             assert record["batch_job_id"] == "batch-job-123"
 
-            success_key = S3RecordStore.state_pointer_key(
-                ProcessingStates.SUCCESS, context
-            )
+            success_key = store.state_pointer_key(ProcessingStates.SUCCESS, context)
             assert (
                 s3.list_objects_v2(Bucket=bucket, Prefix=success_key).get("KeyCount", 0)
                 == 1
             )
-            awaiting_key = S3RecordStore.state_pointer_key(
-                ProcessingStates.AWAITING, context
-            )
+            awaiting_key = store.state_pointer_key(ProcessingStates.AWAITING, context)
             assert (
                 s3.list_objects_v2(Bucket=bucket, Prefix=awaiting_key).get(
                     "KeyCount", 0
@@ -759,7 +751,7 @@ class TestMultiEntityGroup:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        key = S3RecordStore.output_index_key(ProcessingStates.SUCCESS, self.CONTEXT_A)
+        key = store.output_index_key(ProcessingStates.SUCCESS, self.CONTEXT_A)
         assert s3.list_objects_v2(Bucket=bucket, Prefix=key).get("KeyCount", 0) == 1
 
     def test_retry_message_carries_all_entity_ids(
@@ -906,7 +898,7 @@ class TestExitCodeOutcomeRouting:
             sqs_client=sqs,
             now=_fixed_now,
         )
-        key = S3RecordStore.canonical_key(CONTEXT)
+        key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert record["events"][-1]["state"] == "CLOUDY"
@@ -937,12 +929,12 @@ class TestExitCodeOutcomeRouting:
             now=_fixed_now,
         )
         cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
-        cloudy_key = S3RecordStore.output_index_key(cloudy, CONTEXT)
+        cloudy_key = store.output_index_key(cloudy, CONTEXT)
         assert (
             s3.list_objects_v2(Bucket=bucket, Prefix=cloudy_key).get("KeyCount", 0) == 1
         )
         assert not _output_index_exists(
-            s3, bucket, ProcessingStates.FAILURE_NONRETRYABLE
+            s3, bucket, store, ProcessingStates.FAILURE_NONRETRYABLE
         )
 
     def test_retryable_outcome_routes_to_retry_queue(

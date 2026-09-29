@@ -1,4 +1,4 @@
-"""Tests for the IcebergRecordsTable CDK construct."""
+"""Tests for the RecordsRollupTable CDK construct."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import datetime as dt
 from aws_cdk import App, RemovalPolicy, Stack, aws_glue as glue
 from aws_cdk.assertions import Match, Template
 
-from batch_event_job_monitor_cdk.iceberg_records_table import IcebergRecordsTable
 from batch_event_job_monitor_cdk.partition_key_spec import PartitionKeySpec
+from batch_event_job_monitor_cdk.records_rollup_table import RecordsRollupTable
 
 PARTITION_KEYS = [
     PartitionKeySpec("job_type", "string", "enum", enum_values=("monthly-composite",)),
@@ -18,7 +18,7 @@ PARTITION_KEYS = [
 INVENTORY_LOCATION = "s3://test-bucket/inv/test-bucket/records/hive/"
 
 
-def _construct() -> tuple[Stack, IcebergRecordsTable]:
+def _construct() -> tuple[Stack, RecordsRollupTable]:
     app = App()
     stack = Stack(app, "TestStack")
     database = glue.CfnDatabase(
@@ -27,9 +27,9 @@ def _construct() -> tuple[Stack, IcebergRecordsTable]:
         catalog_id="123456789012",
         database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
     )
-    construct = IcebergRecordsTable(
+    construct = RecordsRollupTable(
         stack,
-        "IcebergRecords",
+        "RecordsRollup",
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
@@ -71,7 +71,7 @@ def test_staging_table_storage_location_template() -> None:
                     "Parameters": Match.object_like(
                         {
                             "storage.location.template": (
-                                "s3://test-bucket/staging/run_id=${run_id}/"
+                                "s3://test-bucket/records-rollup/staging/run_id=${run_id}/"
                             )
                         }
                     )
@@ -134,7 +134,7 @@ def test_all_three_table_optimizers_depend_on_the_ddl_resource() -> None:
     template = _template()
     optimizers = template.find_resources("AWS::Glue::TableOptimizer")
     assert len(optimizers) == 3
-    ddl_resources = template.find_resources("Custom::IcebergRecordsTable")
+    ddl_resources = template.find_resources("Custom::RecordsRollupTable")
     (ddl_logical_id,) = ddl_resources.keys()
     for optimizer in optimizers.values():
         assert ddl_logical_id in optimizer["DependsOn"]
@@ -148,7 +148,7 @@ def test_records_inventory_table_is_created() -> None:
         {
             "TableInput": Match.object_like(
                 {
-                    "Name": "records_inventory",
+                    "Name": "records-inventory",
                     "StorageDescriptor": Match.object_like(
                         {"Location": INVENTORY_LOCATION}
                     ),
@@ -160,7 +160,7 @@ def test_records_inventory_table_is_created() -> None:
 
 def test_ddl_custom_resource_receives_the_partition_key_names() -> None:
     _template().has_resource_properties(
-        "Custom::IcebergRecordsTable",
+        "Custom::RecordsRollupTable",
         Match.object_like(
             {
                 "Database": "test_db",
@@ -173,12 +173,12 @@ def test_ddl_custom_resource_receives_the_partition_key_names() -> None:
 
 def test_ddl_custom_resource_receives_the_table_location_and_workgroup() -> None:
     _template().has_resource_properties(
-        "Custom::IcebergRecordsTable",
+        "Custom::RecordsRollupTable",
         Match.object_like(
             {
-                "Table": "records_iceberg",
-                "Location": "s3://test-bucket/iceberg/records/",
-                "Workgroup": "IcebergRecords-workgroup",
+                "Table": "records",
+                "Location": "s3://test-bucket/records-rollup/table/",
+                "Workgroup": "RecordsRollup-workgroup",
             }
         ),
     )
@@ -186,12 +186,12 @@ def test_ddl_custom_resource_receives_the_table_location_and_workgroup() -> None
 
 def test_exposed_attributes_are_the_table_names_and_location() -> None:
     _, construct = _construct()
-    assert construct.iceberg_table_name == "records_iceberg"
-    assert construct.staging_table_name == "records_staging"
-    assert construct.inventory_table_name == "records_inventory"
-    assert construct.table_location == "s3://test-bucket/iceberg/records/"
+    assert construct.table_name == "records"
+    assert construct.staging_table_name == "records-staging"
+    assert construct.inventory_table_name == "records-inventory"
+    assert construct.table_location == "s3://test-bucket/records-rollup/table/"
     assert construct.inventory_location_s3path == INVENTORY_LOCATION
-    assert construct.workgroup_name == "IcebergRecords-workgroup"
+    assert construct.workgroup_name == "RecordsRollup-workgroup"
     assert construct.workgroup is not None
     assert construct.partition_key_names == ["job_type", "tile_id"]
 
@@ -201,16 +201,16 @@ def test_a_workgroup_is_created_with_results_under_the_processing_bucket() -> No
     workgroups = template.find_resources("AWS::Athena::WorkGroup")
     assert len(workgroups) == 1
     (workgroup,) = workgroups.values()
-    assert workgroup["Properties"]["Name"] == "IcebergRecords-workgroup"
+    assert workgroup["Properties"]["Name"] == "RecordsRollup-workgroup"
     output_location = workgroup["Properties"]["WorkGroupConfiguration"][
         "ResultConfiguration"
     ]["OutputLocation"]
-    assert output_location == "s3://test-bucket/athena-results/"
+    assert output_location == "s3://test-bucket/records-rollup/athena-results/"
 
 
 def test_ddl_custom_resource_depends_on_the_created_workgroup() -> None:
     template = _template()
-    ddl_resources = template.find_resources("Custom::IcebergRecordsTable")
+    ddl_resources = template.find_resources("Custom::RecordsRollupTable")
     (resource,) = ddl_resources.values()
     depends_on = resource["DependsOn"]
     workgroups = template.find_resources("AWS::Athena::WorkGroup")
@@ -227,9 +227,9 @@ def test_an_explicit_workgroup_name_skips_creating_one() -> None:
         catalog_id="123456789012",
         database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
     )
-    construct = IcebergRecordsTable(
+    construct = RecordsRollupTable(
         stack,
-        "IcebergRecords",
+        "RecordsRollup",
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
@@ -243,7 +243,7 @@ def test_an_explicit_workgroup_name_skips_creating_one() -> None:
     template = Template.from_stack(stack)
     template.resource_count_is("AWS::Athena::WorkGroup", 0)
     template.has_resource_properties(
-        "Custom::IcebergRecordsTable",
+        "Custom::RecordsRollupTable",
         Match.object_like({"Workgroup": "primary"}),
     )
 
@@ -302,5 +302,5 @@ def test_ddl_handler_role_can_run_the_ddl_through_athena() -> None:
 def test_constructs_are_exported_from_the_package() -> None:
     import batch_event_job_monitor_cdk as package
 
-    assert package.IcebergRecordsTable is IcebergRecordsTable
+    assert package.RecordsRollupTable is RecordsRollupTable
     assert hasattr(package, "RecordsRollupFunction")

@@ -10,9 +10,9 @@ from typing import Any
 from aws_cdk import App, Stack, aws_glue as glue, aws_s3 as s3
 from aws_cdk.assertions import Match, Template
 
-from batch_event_job_monitor_cdk.iceberg_records_table import IcebergRecordsTable
 from batch_event_job_monitor_cdk.partition_key_spec import PartitionKeySpec
 from batch_event_job_monitor_cdk.records_rollup_function import RecordsRollupFunction
+from batch_event_job_monitor_cdk.records_rollup_table import RecordsRollupTable
 
 PARTITION_KEYS = [
     PartitionKeySpec("job_type", "string", "enum", enum_values=("monthly-composite",)),
@@ -66,7 +66,7 @@ def _template() -> Template:
     return template
 
 
-def _construct() -> tuple[RecordsRollupFunction, Template]:
+def _construct(key_prefix: str = "") -> tuple[RecordsRollupFunction, Template]:
     app = App()
     stack = Stack(app, "TestStack")
     bucket = s3.Bucket(stack, "ProcessingBucket", bucket_name="test-bucket")
@@ -76,12 +76,13 @@ def _construct() -> tuple[RecordsRollupFunction, Template]:
         catalog_id="123456789012",
         database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
     )
-    table = IcebergRecordsTable(
+    table = RecordsRollupTable(
         stack,
-        "IcebergRecords",
+        "RecordsRollup",
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
+        key_prefix=key_prefix,
         records_inventory_location_s3path=INVENTORY_LOCATION,
         inventory_datetime_start=dt.datetime(2026, 1, 1, 1, 0),
         partition_keys=PARTITION_KEYS,
@@ -91,7 +92,7 @@ def _construct() -> tuple[RecordsRollupFunction, Template]:
         "Rollup",
         processing_bucket=bucket,
         database_name="test_db",
-        iceberg_table=table,
+        rollup_table=table,
         partition_keys=PARTITION_KEYS,
     )
     return construct, Template.from_stack(stack)
@@ -183,7 +184,7 @@ def test_rollup_is_scheduled_hourly_and_reconcile_weekly() -> None:
     )
 
 
-def test_rollup_partition_keys_default_to_the_iceberg_tables_own() -> None:
+def test_rollup_partition_keys_default_to_the_rollup_tables_own() -> None:
     # A caller who omits partition_keys entirely still gets a MERGE
     # referencing exactly the table's own columns, rather than a rollup
     # function silently pointed at a table it disagrees with.
@@ -196,9 +197,9 @@ def test_rollup_partition_keys_default_to_the_iceberg_tables_own() -> None:
         catalog_id="123456789012",
         database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
     )
-    table = IcebergRecordsTable(
+    table = RecordsRollupTable(
         stack,
-        "IcebergRecords",
+        "RecordsRollup",
         database=database,
         database_name="test_db",
         processing_bucket_name="test-bucket",
@@ -211,7 +212,7 @@ def test_rollup_partition_keys_default_to_the_iceberg_tables_own() -> None:
         "Rollup",
         processing_bucket=bucket,
         database_name="test_db",
-        iceberg_table=table,
+        rollup_table=table,
     )
     template = Template.from_stack(stack)
     functions = template.find_resources(
@@ -245,7 +246,7 @@ def test_both_functions_carry_every_rollup_handler_env_var() -> None:
         "ROLLUP_QUEUE_URL",
         "ROLLUP_STAGING_PREFIX",
         "ROLLUP_DATABASE",
-        "ROLLUP_ICEBERG_TABLE",
+        "ROLLUP_RECORDS_TABLE",
         "ROLLUP_STAGING_TABLE",
         "ROLLUP_INVENTORY_TABLE",
         "ROLLUP_WORKGROUP",
@@ -393,7 +394,7 @@ def test_reconcile_function_can_read_the_s3_inventory_data_files() -> None:
     assert fnmatch.fnmatch(data_key, resource)
 
 
-def test_reconcile_function_has_no_write_access_to_iceberg_data() -> None:
+def test_reconcile_function_has_no_write_access_to_table_data() -> None:
     statements = _reconcile_policy_statements()
     for statement in statements:
         actions = statement["Action"]
@@ -401,8 +402,8 @@ def test_reconcile_function_has_no_write_access_to_iceberg_data() -> None:
         resources = statement["Resource"]
         resources = resources if isinstance(resources, list) else [resources]
         resource_strs = [str(r) for r in resources]
-        touches_iceberg_prefix = any("iceberg/records" in r for r in resource_strs)
-        if touches_iceberg_prefix:
+        touches_table_prefix = any("iceberg/records" in r for r in resource_strs)
+        if touches_table_prefix:
             assert "s3:PutObject" not in actions
             assert "s3:DeleteObject" not in actions
 
@@ -422,7 +423,7 @@ def test_glue_and_athena_grants_are_arn_scoped_not_wildcard() -> None:
 
 def test_rollup_workgroup_env_var_matches_the_tables_own_workgroup() -> None:
     # RecordsRollupFunction does not create a workgroup of its own -- it
-    # defaults to IcebergRecordsTable's, which created exactly one, so the
+    # defaults to RecordsRollupTable's, which created exactly one, so the
     # DDL and the rollup/reconcile queries share one workgroup by
     # construction rather than by the caller coincidentally passing a
     # matching string to both constructs.
@@ -431,7 +432,7 @@ def test_rollup_workgroup_env_var_matches_the_tables_own_workgroup() -> None:
     assert len(workgroups) == 1
     (workgroup,) = workgroups.values()
     workgroup_name = workgroup["Properties"]["Name"]
-    assert workgroup_name == "IcebergRecords-workgroup"
+    assert workgroup_name == "RecordsRollup-workgroup"
 
     functions = template.find_resources(
         "AWS::Lambda::Function",
@@ -464,7 +465,9 @@ def test_staging_prefix_has_a_seven_day_expiration_lifecycle_rule() -> None:
     buckets = template.find_resources("AWS::S3::Bucket")
     (bucket,) = buckets.values()
     rules = bucket["Properties"]["LifecycleConfiguration"]["Rules"]
-    staging_rule = next(rule for rule in rules if rule.get("Prefix") == "staging/")
+    staging_rule = next(
+        rule for rule in rules if rule.get("Prefix") == "records-rollup/staging/"
+    )
     assert staging_rule["ExpirationInDays"] == 7
     assert staging_rule["Status"] == "Enabled"
 
@@ -499,3 +502,46 @@ def test_both_functions_can_invoke_themselves() -> None:
         resources = statement["Resource"]
         assert isinstance(resources, list)
         assert len(resources) == 2
+
+
+def test_key_prefix_reaches_the_event_filter_and_staging_rule() -> None:
+    _, template = _construct(key_prefix="bejm/")
+    template.has_resource_properties(
+        "AWS::Events::Rule",
+        Match.object_like(
+            {
+                "EventPattern": Match.object_like(
+                    {"detail": {"object": {"key": [{"prefix": "bejm/records/"}]}}}
+                )
+            }
+        ),
+    )
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {
+            "LifecycleConfiguration": Match.object_like(
+                {
+                    "Rules": Match.array_with(
+                        [Match.object_like({"Prefix": "bejm/records-rollup/staging/"})]
+                    )
+                }
+            )
+        },
+    )
+
+
+def test_key_prefix_reaches_the_staging_env_var() -> None:
+    _, template = _construct(key_prefix="bejm/")
+    functions = template.find_resources(
+        "AWS::Lambda::Function",
+        {
+            "Properties": {
+                "Environment": {
+                    "Variables": {
+                        "ROLLUP_STAGING_PREFIX": "bejm/records-rollup/staging/"
+                    }
+                }
+            }
+        },
+    )
+    assert len(functions) == 2

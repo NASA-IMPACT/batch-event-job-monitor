@@ -133,6 +133,7 @@ class JobMonitorFunction(Construct):
         *,
         processing_bucket: s3.IBucket,
         job_type_configs: dict[str, JobTypeConfig],
+        key_prefix: str = "",
         queues: MonitoringQueues | None = None,
         metric_namespace: str = "BatchEventJobMonitor",
         function_name: str | None = None,
@@ -156,6 +157,7 @@ class JobMonitorFunction(Construct):
             timeout=timeout,
             environment={
                 "PROCESSING_BUCKET_NAME": processing_bucket.bucket_name,
+                **({"PROCESSING_KEY_PREFIX": key_prefix} if key_prefix else {}),
                 "PROCESSING_JOB_TYPE_CONFIGS": json.dumps(
                     {
                         job_type: config.to_dict()

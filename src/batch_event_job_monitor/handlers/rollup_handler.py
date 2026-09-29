@@ -48,7 +48,7 @@ def config_from_environment() -> RollupConfig:
         queue_url=os.environ["ROLLUP_QUEUE_URL"],
         staging_prefix=os.environ["ROLLUP_STAGING_PREFIX"],
         database=os.environ["ROLLUP_DATABASE"],
-        iceberg_table=os.environ["ROLLUP_ICEBERG_TABLE"],
+        records_table=os.environ["ROLLUP_RECORDS_TABLE"],
         staging_table=os.environ["ROLLUP_STAGING_TABLE"],
         inventory_table=os.environ["ROLLUP_INVENTORY_TABLE"],
         workgroup=os.environ["ROLLUP_WORKGROUP"],

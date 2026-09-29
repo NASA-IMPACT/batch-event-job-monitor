@@ -35,9 +35,10 @@ from .athena_common import (
 from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from .partition_key_spec import PartitionKeySpec
 
-ICEBERG_PREFIX = "iceberg/records/"
-STAGING_PREFIX = "staging/"
-ATHENA_RESULTS_PREFIX = "athena-results/"
+ROLLUP_PREFIX = "records-rollup/"
+TABLE_PREFIX = f"{ROLLUP_PREFIX}table/"
+STAGING_PREFIX = f"{ROLLUP_PREFIX}staging/"
+ATHENA_RESULTS_PREFIX = f"{ROLLUP_PREFIX}athena-results/"
 
 # Athena's documented minimum grant for a query-results location. Shared by
 # every function that queries through this table's workgroup -- the DDL
@@ -57,7 +58,7 @@ ATHENA_RESULTS_ACTIONS = [
 ]
 
 
-class IcebergRecordsTable(Construct):
+class RecordsRollupTable(Construct):
     """Iceberg records table, its staging table, and its inventory table.
 
     Parameters
@@ -70,6 +71,9 @@ class IcebergRecordsTable(Construct):
         Glue database every table is created in.
     database_name : str
         Literal name of ``database`` (not a CDK token).
+    key_prefix : str, optional
+        Parent prefix the rollup's own S3 prefixes sit under. Must match
+        the ProcessingBucket's own key_prefix. Defaults to "".
     processing_bucket_name : str
         Name of the bucket holding records/, staging/, and the Iceberg data.
     records_inventory_location_s3path : str
@@ -87,12 +91,12 @@ class IcebergRecordsTable(Construct):
         Pass an existing workgroup's name to skip creating one; in that
         case its query results location is not this construct's
         responsibility.
-    iceberg_table_name : str, optional
-        Name of the Iceberg table. Defaults to "records_iceberg".
+    table_name : str, optional
+        Name of the Iceberg table. Defaults to "records".
     staging_table_name : str, optional
-        Name of the staging table. Defaults to "records_staging".
+        Name of the staging table. Defaults to "records-staging".
     inventory_table_name : str, optional
-        Name of the inventory table. Defaults to "records_inventory".
+        Name of the inventory table. Defaults to "records-inventory".
     removal_policy : RemovalPolicy, optional
         Removal policy for the Iceberg table (applied via the DDL custom
         resource). The staging table and the inventory table are always
@@ -103,7 +107,7 @@ class IcebergRecordsTable(Construct):
 
     Attributes
     ----------
-    iceberg_table_name : str
+    table_name : str
         Name of the Iceberg table.
     staging_table_name : str
         Name of the staging table.
@@ -137,22 +141,30 @@ class IcebergRecordsTable(Construct):
         database: glue.CfnDatabase,
         database_name: str,
         processing_bucket_name: str,
+        key_prefix: str = "",
         records_inventory_location_s3path: str,
         inventory_datetime_start: dt.datetime,
         partition_keys: list[PartitionKeySpec],
         workgroup_name: str | None = None,
-        iceberg_table_name: str = "records_iceberg",
-        staging_table_name: str = "records_staging",
-        inventory_table_name: str = "records_inventory",
+        table_name: str = "records",
+        staging_table_name: str = "records-staging",
+        inventory_table_name: str = "records-inventory",
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        self.iceberg_table_name = iceberg_table_name
+        self.table_name = table_name
         self.staging_table_name = staging_table_name
         self.inventory_table_name = inventory_table_name
-        self.table_location = f"s3://{processing_bucket_name}/{ICEBERG_PREFIX}"
+        self.key_prefix = (
+            f"{key_prefix}/"
+            if key_prefix and not key_prefix.endswith("/")
+            else key_prefix
+        )
+        self.table_location = (
+            f"s3://{processing_bucket_name}/{self.key_prefix}{TABLE_PREFIX}"
+        )
         self.inventory_location_s3path = records_inventory_location_s3path
 
         self.workgroup_name, self.workgroup = self._resolve_workgroup(
@@ -174,7 +186,7 @@ class IcebergRecordsTable(Construct):
         self.staging_table = self._create_staging_table(
             database=database,
             table_name=staging_table_name,
-            location=f"s3://{processing_bucket_name}/{STAGING_PREFIX}",
+            location=f"s3://{processing_bucket_name}/{self.key_prefix}{STAGING_PREFIX}",
             partition_key_names=partition_key_names,
         )
 
@@ -223,7 +235,7 @@ class IcebergRecordsTable(Construct):
             work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
                 result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
                     output_location=(
-                        f"s3://{processing_bucket_name}/{ATHENA_RESULTS_PREFIX}"
+                        f"s3://{processing_bucket_name}/{self.key_prefix}{ATHENA_RESULTS_PREFIX}"
                     ),
                 ),
             ),
@@ -289,7 +301,7 @@ class IcebergRecordsTable(Construct):
             self,
             "DdlFunction",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            handler="batch_event_job_monitor.handlers.iceberg_ddl_handler.handler",
+            handler="batch_event_job_monitor.handlers.records_table_ddl_handler.handler",
             code=lambda_.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
             timeout=Duration.minutes(10),
         )
@@ -312,7 +324,7 @@ class IcebergRecordsTable(Construct):
                     "glue:DeleteTable",
                 ],
                 resources=self._glue_table_arns(
-                    database_name=database_name, table_name=self.iceberg_table_name
+                    database_name=database_name, table_name=self.table_name
                 ),
             )
         )
@@ -332,18 +344,24 @@ class IcebergRecordsTable(Construct):
         provider = cr.Provider(self, "DdlProvider", on_event_handler=ddl_function)
         resource = CustomResource(
             self,
-            "IcebergTable",
+            "Table",
             service_token=provider.service_token,
-            resource_type="Custom::IcebergRecordsTable",
+            resource_type="Custom::RecordsRollupTable",
             properties={
                 "Database": database_name,
-                "Table": self.iceberg_table_name,
+                "Table": self.table_name,
                 "Location": self.table_location,
                 "PartitionKeyNames": ",".join(partition_key_names),
                 "Workgroup": workgroup_name,
                 "RemovalPolicy": (
                     "destroy" if removal_policy is RemovalPolicy.DESTROY else "retain"
                 ),
+                # CloudFormation re-invokes a custom resource only when its
+                # properties change, so a handler whose code changed but
+                # whose inputs did not is shipped and never called. The
+                # asset carries both the handler and the SQL generation, so
+                # its version changes whenever either does.
+                "HandlerVersion": ddl_function.current_version.version,
             },
         )
         resource.node.add_dependency(database)
@@ -380,7 +398,7 @@ class IcebergRecordsTable(Construct):
             iam.PolicyStatement(
                 actions=["glue:GetTable", "glue:UpdateTable"],
                 resources=self._glue_table_arns(
-                    database_name=database_name, table_name=self.iceberg_table_name
+                    database_name=database_name, table_name=self.table_name
                 ),
             )
         )
@@ -395,7 +413,7 @@ class IcebergRecordsTable(Construct):
                 construct_id,
                 catalog_id=Aws.ACCOUNT_ID,
                 database_name=database_name,
-                table_name=self.iceberg_table_name,
+                table_name=self.table_name,
                 type=optimizer_type,
                 table_optimizer_configuration=(
                     glue.CfnTableOptimizer.TableOptimizerConfigurationProperty(
