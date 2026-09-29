@@ -356,6 +356,12 @@ class RecordsRollupTable(Construct):
                 "RemovalPolicy": (
                     "destroy" if removal_policy is RemovalPolicy.DESTROY else "retain"
                 ),
+                # CloudFormation re-invokes a custom resource only when its
+                # properties change, so a handler whose code changed but
+                # whose inputs did not is shipped and never called. The
+                # asset carries both the handler and the SQL generation, so
+                # its version changes whenever either does.
+                "HandlerVersion": ddl_function.current_version.version,
             },
         )
         resource.node.add_dependency(database)
