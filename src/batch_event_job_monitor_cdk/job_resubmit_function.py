@@ -15,7 +15,6 @@ docs/resubmitting-jobs.md.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from aws_cdk import (
@@ -28,17 +27,9 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-import batch_event_job_monitor
 from batch_event_job_monitor.models import JobTypeConfig
+from batch_event_job_monitor_cdk.lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 
-_HANDLER_ENTRY = str(Path(batch_event_job_monitor.__file__).parent.parent)
-_HANDLER_EXCLUDE = [
-    "*",
-    "!batch_event_job_monitor",
-    "!batch_event_job_monitor/**",
-    "**/__pycache__",
-    "**/*.pyc",
-]
 _DEFAULT_HANDLER_PATH = "batch_event_job_monitor.handlers.job_resubmit_handler.handler"
 
 
@@ -152,7 +143,7 @@ class JobResubmitFunction(Construct):
                 "Function",
                 runtime=_lambda.Runtime.PYTHON_3_12,
                 handler=_DEFAULT_HANDLER_PATH,
-                code=_lambda.Code.from_asset(_HANDLER_ENTRY, exclude=_HANDLER_EXCLUDE),
+                code=_lambda.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
                 function_name=function_name,
                 memory_size=memory_size,
                 timeout=timeout,

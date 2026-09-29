@@ -9,7 +9,15 @@ Reusable AWS Batch job-monitoring components:
   - `MonitoringQueues`: the retry, dead-letter, and untracked-job queues
   - `JobMonitorFunction`: a batteries-included job-monitor Lambda
   - `JobResubmitFunction`: infrastructure for a retry-queue-driven resubmit Lambda
-  - `AthenaRecordsTable` / `AthenaStateTable` / `AthenaOutputsTable`: Glue tables and views for querying job logs
+  - `AthenaStateTable` / `AthenaOutputsTable`: Glue tables and views for querying job state and outputs
+  - `IcebergRecordsTable` / `RecordsRollupFunction`: Apache Iceberg table and rollup Lambdas for querying records via
+    Athena
+
+### Querying records
+
+Records are queried through the `IcebergRecordsTable` construct, which rolls JSON objects under `records/` into an
+Apache Iceberg table queryable via Athena. `AthenaRecordsTable` remains in the package for backward compatibility and is
+slated for retirement once the Iceberg table is verified complete against a deployed environment.
 
 See [`docs/constructs.md`](docs/constructs.md) for what each construct creates, what it needs from you, and how they
 wire together.

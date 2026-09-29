@@ -11,6 +11,13 @@ from mypy_boto3_sqs import SQSClient
 # AWS credentials / mocking
 # ---------------------------------------------------------------------------
 
+# Handler modules build their boto3 clients at import time, the way a Lambda
+# wants them built once per container. pytest imports this file before it
+# collects any test module, so this is the only place a region can be set
+# early enough for those imports to succeed on a machine that has none
+# configured. setdefault leaves a real ambient configuration alone.
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-west-2")
+
 
 @pytest.fixture
 def aws_credentials() -> None:
@@ -61,3 +68,8 @@ def retry_queue_url(sqs: SQSClient) -> str:
 @pytest.fixture
 def dlq_url(sqs: SQSClient) -> str:
     return sqs.create_queue(QueueName="test-dlq")["QueueUrl"]
+
+
+@pytest.fixture
+def rollup_queue_url(sqs: SQSClient) -> str:
+    return sqs.create_queue(QueueName="test-rollup-queue")["QueueUrl"]
