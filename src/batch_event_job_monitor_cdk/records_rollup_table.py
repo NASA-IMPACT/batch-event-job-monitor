@@ -344,7 +344,7 @@ class RecordsRollupTable(Construct):
         provider = cr.Provider(self, "DdlProvider", on_event_handler=ddl_function)
         resource = CustomResource(
             self,
-            "IcebergTable",
+            "Table",
             service_token=provider.service_token,
             resource_type="Custom::RecordsRollupTable",
             properties={
