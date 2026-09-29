@@ -21,15 +21,15 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-from .iceberg_records_table import (
-    ATHENA_RESULTS_ACTIONS,
-    ATHENA_RESULTS_PREFIX,
-    ICEBERG_PREFIX,
-    STAGING_PREFIX,
-    IcebergRecordsTable,
-)
 from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from .partition_key_spec import PartitionKeySpec
+from .records_rollup_table import (
+    ATHENA_RESULTS_ACTIONS,
+    ATHENA_RESULTS_PREFIX,
+    RECORDS_ROLLUP_PREFIX,
+    STAGING_PREFIX,
+    RecordsRollupTable,
+)
 
 RECORDS_PREFIX = "records/"
 _ROLLUP_TIMEOUT = Duration.minutes(15)
@@ -117,14 +117,14 @@ class RecordsRollupFunction(Construct):
         interface an imported/foreign bucket would satisfy.
     database_name : str
         Glue database holding the rollup tables.
-    iceberg_table : IcebergRecordsTable
+    rollup_table : RecordsRollupTable
         The table this rollup maintains. Its ``workgroup_name`` is this
         construct's default Athena workgroup (see ``workgroup_name``), and
         its ``inventory_location_s3path`` scopes the reconcile Lambda's
         read grant on the S3 Inventory data reconcile anti-joins against.
     partition_keys : list[PartitionKeySpec] or None, optional
         Ordered partition keys, including the leading job_type entry.
-        Defaults to ``iceberg_table.partition_key_names`` -- the same
+        Defaults to ``rollup_table.partition_key_names`` -- the same
         partition keys the table's own MERGE and DDL were generated from,
         so the two constructs cannot generate a MERGE referencing columns
         the table does not have by drifting to two different lists. Pass
@@ -132,7 +132,7 @@ class RecordsRollupFunction(Construct):
         correct in production.
     workgroup_name : str or None, optional
         Athena workgroup the rollup/reconcile Lambdas query through.
-        Defaults to ``iceberg_table.workgroup_name`` -- the same workgroup
+        Defaults to ``rollup_table.workgroup_name`` -- the same workgroup
         the table's own DDL runs in, so both constructs share one
         workgroup (and its results location) without CDK having to infer
         that coupling from two bare strings. Pass an explicit name only to
@@ -168,7 +168,7 @@ class RecordsRollupFunction(Construct):
         *,
         processing_bucket: s3.Bucket,
         database_name: str,
-        iceberg_table: IcebergRecordsTable,
+        rollup_table: RecordsRollupTable,
         partition_keys: list[PartitionKeySpec] | None = None,
         workgroup_name: str | None = None,
         rollup_schedule: events.Schedule | None = None,
@@ -182,12 +182,12 @@ class RecordsRollupFunction(Construct):
         resolved_workgroup_name = (
             workgroup_name
             if workgroup_name is not None
-            else iceberg_table.workgroup_name
+            else rollup_table.workgroup_name
         )
         partition_key_names = (
             [key.name for key in partition_keys]
             if partition_keys is not None
-            else iceberg_table.partition_key_names
+            else rollup_table.partition_key_names
         )
 
         processing_bucket.enable_event_bridge_notification()
@@ -228,9 +228,9 @@ class RecordsRollupFunction(Construct):
             "ROLLUP_QUEUE_URL": self.queue.queue_url,
             "ROLLUP_STAGING_PREFIX": STAGING_PREFIX,
             "ROLLUP_DATABASE": database_name,
-            "ROLLUP_ICEBERG_TABLE": iceberg_table.iceberg_table_name,
-            "ROLLUP_STAGING_TABLE": iceberg_table.staging_table_name,
-            "ROLLUP_INVENTORY_TABLE": iceberg_table.inventory_table_name,
+            "ROLLUP_RECORDS_TABLE": rollup_table.table_name,
+            "ROLLUP_STAGING_TABLE": rollup_table.staging_table_name,
+            "ROLLUP_INVENTORY_TABLE": rollup_table.inventory_table_name,
             "ROLLUP_WORKGROUP": resolved_workgroup_name,
             "ROLLUP_PARTITION_KEY_NAMES": ",".join(partition_key_names),
             "ROLLUP_MAX_KEYS": str(max_keys_per_run),
@@ -252,13 +252,13 @@ class RecordsRollupFunction(Construct):
             f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:database/{database_name}",
             f"arn:aws:glue:{Aws.REGION}:{Aws.ACCOUNT_ID}:table/{database_name}/*",
         ]
-        iceberg_data_resources = [bucket_arn, f"{bucket_arn}/{ICEBERG_PREFIX}*"]
+        table_data_resources = [bucket_arn, f"{bucket_arn}/{RECORDS_ROLLUP_PREFIX}*"]
         athena_results_resources = [
             bucket_arn,
             f"{bucket_arn}/{ATHENA_RESULTS_PREFIX}*",
         ]
         inventory_resource = _inventory_data_resource(
-            iceberg_table.inventory_location_s3path
+            rollup_table.inventory_location_s3path
         )
 
         self._grant_rollup(
@@ -266,14 +266,14 @@ class RecordsRollupFunction(Construct):
             bucket_arn=bucket_arn,
             workgroup_arn=workgroup_arn,
             glue_arns=glue_arns,
-            iceberg_data_resources=iceberg_data_resources,
+            table_data_resources=table_data_resources,
             athena_results_resources=athena_results_resources,
         )
         self._grant_reconcile(
             self.reconcile_function,
             workgroup_arn=workgroup_arn,
             glue_arns=glue_arns,
-            iceberg_data_resources=iceberg_data_resources,
+            table_data_resources=table_data_resources,
             athena_results_resources=athena_results_resources,
             inventory_resource=inventory_resource,
         )
@@ -377,7 +377,7 @@ class RecordsRollupFunction(Construct):
         bucket_arn: str,
         workgroup_arn: str,
         glue_arns: list[str],
-        iceberg_data_resources: list[str],
+        table_data_resources: list[str],
         athena_results_resources: list[str],
     ) -> None:
         """Grant the rollup Lambda's full read/write/commit permissions.
@@ -392,7 +392,7 @@ class RecordsRollupFunction(Construct):
             ARN of the Athena workgroup rollup queries run through.
         glue_arns : list[str]
             Catalog/database/table ARNs for the rollup database.
-        iceberg_data_resources : list[str]
+        table_data_resources : list[str]
             Bucket and object ARNs covering the Iceberg table's data
             location.
         athena_results_resources : list[str]
@@ -418,7 +418,7 @@ class RecordsRollupFunction(Construct):
         function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
-                resources=iceberg_data_resources,
+                resources=table_data_resources,
             )
         )
         function.add_to_role_policy(
@@ -451,7 +451,7 @@ class RecordsRollupFunction(Construct):
         *,
         workgroup_arn: str,
         glue_arns: list[str],
-        iceberg_data_resources: list[str],
+        table_data_resources: list[str],
         athena_results_resources: list[str],
         inventory_resource: str,
     ) -> None:
@@ -469,7 +469,7 @@ class RecordsRollupFunction(Construct):
             ARN of the Athena workgroup reconcile queries run through.
         glue_arns : list[str]
             Catalog/database/table ARNs for the rollup database.
-        iceberg_data_resources : list[str]
+        table_data_resources : list[str]
             Bucket and object ARNs covering the Iceberg table's data
             location.
         athena_results_resources : list[str]
@@ -485,13 +485,13 @@ class RecordsRollupFunction(Construct):
                 # Iceberg data prefix, because reconcile_sql's anti-join
                 # reads the records/ S3 Inventory through
                 # SymlinkTextInputFormat, which needs Athena to LIST the
-                # inventory prefix -- a prefix outside iceberg_data_resources
+                # inventory prefix -- a prefix outside table_data_resources
                 # and not otherwise covered by inventory_resource, which
                 # only grants GetObject. Scoping this down would break
                 # reconcile with an Access Denied that does not point at
                 # this cause.
                 actions=["s3:GetObject", "s3:ListBucket"],
-                resources=iceberg_data_resources,
+                resources=table_data_resources,
             )
         )
         function.add_to_role_policy(

@@ -13,7 +13,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from batch_event_job_monitor.rollup import run_query
-from batch_event_job_monitor.rollup_schema import create_table_sql, iceberg_columns
+from batch_event_job_monitor.rollup_schema import create_table_sql, records_columns
 
 if TYPE_CHECKING:
     from mypy_boto3_glue import GlueClient
@@ -104,7 +104,7 @@ def added_column_sql(
             "manual migration required for incompatible columns: " + ", ".join(problems)
         )
     return [
-        f"ALTER TABLE {database}.{table} ADD COLUMNS ({name} {col_type})"
+        f'ALTER TABLE "{database}"."{table}" ADD COLUMNS ({name} {col_type})'
         for name, col_type in new_columns
         if name not in old_by_name
     ]
@@ -226,7 +226,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
             database=database,
             table=table,
             old_columns=old_columns,
-            new_columns=iceberg_columns(partition_key_names),
+            new_columns=records_columns(partition_key_names),
         ):
             run_query(athena_client=_athena_client, sql=statement, workgroup=workgroup)
         return {"PhysicalResourceId": physical_id}

@@ -11,7 +11,7 @@
 - [`JobResubmitFunction`](#jobresubmitfunction)
 - [`AthenaRecordsTable`](#athenarecordstable)
 - [`AthenaStateTable` and `AthenaOutputsTable`](#athenastatetable-and-athenaoutputstable)
-- [`IcebergRecordsTable`](#icebergrecordstable)
+- [`RecordsRollupTable`](#icebergrecordstable)
 - [`RecordsRollupFunction`](#recordsrollupfunction)
 - [`PartitionKeySpec`](#partitionkeyspec)
 - [`job_type_config()`](#jobtypeconfig)
@@ -29,7 +29,7 @@ Everything in `batch_event_job_monitor_cdk`, what it creates, and what it needs 
 | [`AthenaRecordsTable`](#athenarecordstable)                      | a partition-projected Glue table over `records/`                             | a Glue database, the bucket name, partition keys                                          |
 | [`AthenaStateTable`](#athenastatetable-and-athenaoutputstable)   | a Glue table over the `state/` S3 Inventory + a Presto view                  | a Glue database, the inventory location, partition keys                                   |
 | [`AthenaOutputsTable`](#athenastatetable-and-athenaoutputstable) | a Glue table over the `outputs/` S3 Inventory + a Presto view                | a Glue database, the inventory location, partition keys                                   |
-| [`IcebergRecordsTable`](#icebergrecordstable)                    | Iceberg table via Athena DDL, staging table, inventory table, optimizer      | a Glue database, bucket name, records inventory location, partition keys                  |
+| [`RecordsRollupTable`](#icebergrecordstable)                     | Iceberg table via Athena DDL, staging table, inventory table, optimizer      | a Glue database, bucket name, records inventory location, partition keys                  |
 | [`RecordsRollupFunction`](#recordsrollupfunction)                | SQS queue/DLQ, EventBridge rule on `records/` prefix, two Lambdas            | the processing bucket, database name, Iceberg table, partition keys                       |
 | [`PartitionKeySpec`](#partitionkeyspec)                          | nothing -- a value type describing one partition key                         | --                                                                                        |
 | [`job_type_config()`](#job_type_config)                          | nothing -- a `JobTypeConfig` from typed CDK Batch refs                       | an `IJobQueue`, an `IJobDefinition`                                                       |
@@ -47,7 +47,7 @@ from batch_event_job_monitor_cdk import (
     AthenaOutputsTable,
     AthenaRecordsTable,
     AthenaStateTable,
-    IcebergRecordsTable,
+    RecordsRollupTable,
     JobMonitorFunction,
     JobResubmitFunction,
     PartitionKeySpec,
@@ -104,7 +104,7 @@ AthenaOutputsTable(self, "Outputs", database=database, database_name="processing
                    table_datetime_start=dt_start, table_name="outputs_inventory", view_name="outputs",
                    partition_keys=partition_keys)
 
-iceberg_table = IcebergRecordsTable(
+records_table = RecordsRollupTable(
     self, "IcebergRecords",
     database=database, database_name="processing",
     processing_bucket_name=processing.bucket_name,
@@ -116,7 +116,7 @@ RecordsRollupFunction(
     self, "RecordsRollup",
     processing_bucket=processing.bucket,
     database_name="processing",
-    iceberg_table=iceberg_table,
+    records_table=records_table,
 )
 ```
 
@@ -306,7 +306,7 @@ reconciliation cheap at volume.
 actually delivers the report. You cannot know that hour until the first report lands, and a wrong guess makes early
 partitions read empty rather than error -- so check the delivered `dt=` prefix after the first delivery and correct it.
 
-## `IcebergRecordsTable`
+## `RecordsRollupTable`
 
 Creates the Apache Iceberg table that rolls up records/ JSON objects into a queryable columnar format via Athena, plus
 the supporting staging table (NDJSON), the inventory table (S3 Inventory Parquet), and the Glue table optimizer for
@@ -331,7 +331,7 @@ tables are always created with `RemovalPolicy.DESTROY`, matching the other inven
 ```python
 import datetime as dt
 
-iceberg = IcebergRecordsTable(
+iceberg = RecordsRollupTable(
     self,
     "IcebergRecords",
     database=database,
@@ -343,7 +343,7 @@ iceberg = IcebergRecordsTable(
     removal_policy=RemovalPolicy.RETAIN,  # keep table on stack deletion
 )
 
-iceberg.iceberg_table_name  # the rolled-up records table
+iceberg.table_name  # the rolled-up records table
 iceberg.staging_table_name  # the NDJSON staging table
 iceberg.inventory_table_name  # the S3 Inventory query table
 iceberg.table_location  # s3://... URI of table data
@@ -365,7 +365,7 @@ weekly to reconcile drift from the S3 Inventory (the backfill function -- invoke
 `ReconcileDrift` metric reaches 0).
 
 Both Lambdas are created from a single handler asset with different payloads (`"mode": "rollup"` or
-`"mode": "reconcile"`). They share one Athena workgroup (defaulting to `iceberg_table.workgroup_name`).
+`"mode": "reconcile"`). They share one Athena workgroup (defaulting to `records_table.workgroup_name`).
 
 **Recursive self-invocation:** AWS Lambda defaults to terminating self-invoking chains at 16 invocations as a safety
 limit. This construct opts out via `recursive_loop=RecursiveLoop.ALLOW` to support draining long queues and backfilling
@@ -374,7 +374,7 @@ cannot fan out; (2) async retries are set to 0 so failures stop the chain rather
 the handler prevents infinite loops; (4) `RollupChainDepth`/`ReconcileChainDepth` metrics report depth at each step to
 alarm on runaway chains.
 
-**Freshness for consumers:** Query `SELECT max(rolled_up_at) FROM {database}.{iceberg_table}` to get the timestamp of
+**Freshness for consumers:** Query `SELECT max(rolled_up_at) FROM {database}.{records_table}` to get the timestamp of
 the most recent rolled-up record.
 
 **Finding job logs:** `log_stream_name` holds the CloudWatch log stream for the record's most recent Batch attempt, in
@@ -426,7 +426,7 @@ RecordsRollupFunction(
     "RecordsRollup",
     processing_bucket=processing.bucket,  # concrete Bucket (not IBucket)
     database_name="processing",
-    iceberg_table=iceberg,
+    records_table=iceberg,
     partition_keys=None,  # defaults to iceberg.partition_key_names
     workgroup_name=None,  # defaults to iceberg.workgroup_name
     max_keys_per_run=25000,
@@ -440,7 +440,7 @@ RecordsRollupFunction(
   `enable_event_bridge_notification()` and `add_lifecycle_rule()` on the bucket, which are not part of the `IBucket`
   interface. An imported/foreign bucket cannot be used.
 - The caller must add `("records", "records/")` to the `ProcessingBucket` `inventories` list.
-- The `inventory_datetime_start` passed to `IcebergRecordsTable` must match the S3 Inventory delivery hour.
+- The `inventory_datetime_start` passed to `RecordsRollupTable` must match the S3 Inventory delivery hour.
 
 ## `PartitionKeySpec`
 

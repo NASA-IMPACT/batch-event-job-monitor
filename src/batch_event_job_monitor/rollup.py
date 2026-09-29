@@ -439,7 +439,7 @@ class RollupConfig:
         Key prefix for staging objects, with a trailing slash.
     database : str
         Glue database holding every table below.
-    iceberg_table : str
+    records_table : str
         Rolled-up Iceberg table name.
     staging_table : str
         NDJSON staging table name.
@@ -463,7 +463,7 @@ class RollupConfig:
     queue_url: str
     staging_prefix: str
     database: str
-    iceberg_table: str
+    records_table: str
     staging_table: str
     inventory_table: str
     workgroup: str
@@ -627,7 +627,7 @@ def run_rollup(*, config: RollupConfig, clients: Clients, depth: int) -> dict[st
         )
         sql = merge_sql(
             database=config.database,
-            iceberg_table=config.iceberg_table,
+            records_table=config.records_table,
             staging_table=config.staging_table,
             run_id=run_id,
             partition_key_names=config.partition_key_names,
@@ -727,7 +727,7 @@ def run_reconcile(
             athena_client=clients.athena,
             sql=reconcile_sql(
                 database=config.database,
-                iceberg_table=config.iceberg_table,
+                records_table=config.records_table,
                 inventory_table=config.inventory_table,
             ),
             workgroup=config.workgroup,
