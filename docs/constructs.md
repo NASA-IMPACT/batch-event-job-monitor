@@ -128,9 +128,11 @@ Inventory configuration per `(inventory_id, objects_prefix)` pair. `inventory_lo
 
 ### Key prefix
 
-By default every BEJM key sits at the bucket root: `records/`, `state/`, `outputs/`, the inventory reports, and the
-rollup's `records-rollup/`, `staging/` and `athena-results/`. Pass `key_prefix` to put all of them under one parent, so
-a bucket shared with consumer data keeps this schema in a single subtree.
+By default every BEJM key sits at the bucket root: `records/`, `state/`, `outputs/`, the inventory reports, and
+`records-rollup/`, which nests everything the rollup owns -- `records-rollup/table/` for the table's own data and
+metadata, `records-rollup/staging/` for the NDJSON the MERGE reads, and `records-rollup/athena-results/` for the
+workgroup's query output. Pass `key_prefix` to put all of them under one parent, so a bucket shared with consumer data
+keeps this schema in a single subtree.
 
 ```python
 ProcessingBucket(

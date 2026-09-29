@@ -35,9 +35,10 @@ from .athena_common import (
 from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from .partition_key_spec import PartitionKeySpec
 
-RECORDS_ROLLUP_PREFIX = "records-rollup/"
-STAGING_PREFIX = "staging/"
-ATHENA_RESULTS_PREFIX = "athena-results/"
+ROLLUP_PREFIX = "records-rollup/"
+TABLE_PREFIX = f"{ROLLUP_PREFIX}table/"
+STAGING_PREFIX = f"{ROLLUP_PREFIX}staging/"
+ATHENA_RESULTS_PREFIX = f"{ROLLUP_PREFIX}athena-results/"
 
 # Athena's documented minimum grant for a query-results location. Shared by
 # every function that queries through this table's workgroup -- the DDL
@@ -162,7 +163,7 @@ class RecordsRollupTable(Construct):
             else key_prefix
         )
         self.table_location = (
-            f"s3://{processing_bucket_name}/{self.key_prefix}{RECORDS_ROLLUP_PREFIX}"
+            f"s3://{processing_bucket_name}/{self.key_prefix}{TABLE_PREFIX}"
         )
         self.inventory_location_s3path = records_inventory_location_s3path
 

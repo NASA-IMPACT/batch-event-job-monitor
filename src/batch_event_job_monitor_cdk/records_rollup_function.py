@@ -26,8 +26,8 @@ from .partition_key_spec import PartitionKeySpec
 from .records_rollup_table import (
     ATHENA_RESULTS_ACTIONS,
     ATHENA_RESULTS_PREFIX,
-    RECORDS_ROLLUP_PREFIX,
     STAGING_PREFIX,
+    TABLE_PREFIX,
     RecordsRollupTable,
 )
 
@@ -255,7 +255,7 @@ class RecordsRollupFunction(Construct):
         ]
         table_data_resources = [
             bucket_arn,
-            f"{bucket_arn}/{key_prefix}{RECORDS_ROLLUP_PREFIX}*",
+            f"{bucket_arn}/{key_prefix}{TABLE_PREFIX}*",
         ]
         athena_results_resources = [
             bucket_arn,

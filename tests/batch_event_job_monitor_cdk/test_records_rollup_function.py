@@ -465,7 +465,9 @@ def test_staging_prefix_has_a_seven_day_expiration_lifecycle_rule() -> None:
     buckets = template.find_resources("AWS::S3::Bucket")
     (bucket,) = buckets.values()
     rules = bucket["Properties"]["LifecycleConfiguration"]["Rules"]
-    staging_rule = next(rule for rule in rules if rule.get("Prefix") == "staging/")
+    staging_rule = next(
+        rule for rule in rules if rule.get("Prefix") == "records-rollup/staging/"
+    )
     assert staging_rule["ExpirationInDays"] == 7
     assert staging_rule["Status"] == "Enabled"
 
@@ -520,7 +522,7 @@ def test_key_prefix_reaches_the_event_filter_and_staging_rule() -> None:
             "LifecycleConfiguration": Match.object_like(
                 {
                     "Rules": Match.array_with(
-                        [Match.object_like({"Prefix": "bejm/staging/"})]
+                        [Match.object_like({"Prefix": "bejm/records-rollup/staging/"})]
                     )
                 }
             )
@@ -534,7 +536,11 @@ def test_key_prefix_reaches_the_staging_env_var() -> None:
         "AWS::Lambda::Function",
         {
             "Properties": {
-                "Environment": {"Variables": {"ROLLUP_STAGING_PREFIX": "bejm/staging/"}}
+                "Environment": {
+                    "Variables": {
+                        "ROLLUP_STAGING_PREFIX": "bejm/records-rollup/staging/"
+                    }
+                }
             }
         },
     )

@@ -71,7 +71,7 @@ def test_staging_table_storage_location_template() -> None:
                     "Parameters": Match.object_like(
                         {
                             "storage.location.template": (
-                                "s3://test-bucket/staging/run_id=${run_id}/"
+                                "s3://test-bucket/records-rollup/staging/run_id=${run_id}/"
                             )
                         }
                     )
@@ -177,7 +177,7 @@ def test_ddl_custom_resource_receives_the_table_location_and_workgroup() -> None
         Match.object_like(
             {
                 "Table": "records",
-                "Location": "s3://test-bucket/records-rollup/",
+                "Location": "s3://test-bucket/records-rollup/table/",
                 "Workgroup": "RecordsRollup-workgroup",
             }
         ),
@@ -189,7 +189,7 @@ def test_exposed_attributes_are_the_table_names_and_location() -> None:
     assert construct.table_name == "records"
     assert construct.staging_table_name == "records-staging"
     assert construct.inventory_table_name == "records-inventory"
-    assert construct.table_location == "s3://test-bucket/records-rollup/"
+    assert construct.table_location == "s3://test-bucket/records-rollup/table/"
     assert construct.inventory_location_s3path == INVENTORY_LOCATION
     assert construct.workgroup_name == "RecordsRollup-workgroup"
     assert construct.workgroup is not None
@@ -205,7 +205,7 @@ def test_a_workgroup_is_created_with_results_under_the_processing_bucket() -> No
     output_location = workgroup["Properties"]["WorkGroupConfiguration"][
         "ResultConfiguration"
     ]["OutputLocation"]
-    assert output_location == "s3://test-bucket/athena-results/"
+    assert output_location == "s3://test-bucket/records-rollup/athena-results/"
 
 
 def test_ddl_custom_resource_depends_on_the_created_workgroup() -> None:
