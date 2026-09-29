@@ -118,13 +118,14 @@ def create_table_sql(
         A CREATE TABLE IF NOT EXISTS statement.
     """
     column_sql = ",\n".join(
-        f"{name} {col_type}" for name, col_type in records_columns(partition_key_names)
+        f"`{name}` {col_type}"
+        for name, col_type in records_columns(partition_key_names)
     )
     return f"""
-        CREATE TABLE IF NOT EXISTS "{database}"."{table}" (
+        CREATE TABLE IF NOT EXISTS `{database}`.`{table}` (
             {column_sql}
         )
-        PARTITIONED BY ({partition_key_names[0]})
+        PARTITIONED BY (`{partition_key_names[0]}`)
         LOCATION '{location}'
         TBLPROPERTIES ('table_type'='ICEBERG', 'format'='parquet')
     """

@@ -55,21 +55,22 @@ def test_merge_rejects_a_run_id_that_is_not_a_uuid() -> None:
         )
 
 
-def test_create_table_sql_quotes_the_table_but_not_the_columns() -> None:
-    """A quoted column name makes Athena reject the events column's struct.
+def test_create_table_sql_backticks_the_table_and_leaves_columns_bare() -> None:
+    """Backticks keep Athena on the parser that understands struct<...>.
 
-    The table name is quoted so it may contain hyphens, which callers can
-    supply through the table_name parameters.
+    Double quotes switch it to one that does not, which is why a hyphenated
+    table name is expressible and a hyphenated column name is not.
     """
     sql = create_table_sql(
         database="test_db",
         table="records-rollup",
-        location="s3://test-bucket/records-rollup/",
+        location="s3://test-bucket/records-rollup/table/",
         partition_key_names=PARTITION_KEY_NAMES,
     )
-    assert '"test_db"."records-rollup"' in sql
-    assert '"events"' not in sql
-    assert "events array<struct<" in sql
+    assert "CREATE TABLE IF NOT EXISTS `test_db`.`records-rollup`" in sql
+    assert "`job_type` string" in sql
+    assert '"' not in sql
+    assert "`events` array<struct<" in sql
 
 
 def test_log_stream_name_is_declared_on_both_tables() -> None:

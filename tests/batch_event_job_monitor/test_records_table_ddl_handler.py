@@ -236,7 +236,7 @@ def test_added_column_sql_emits_one_alter_per_new_column() -> None:
         old_columns=[("job_type", "string"), ("attempt", "int")],
         new_columns=[("job_type", "string"), ("attempt", "int"), ("note", "string")],
     )
-    assert statements == ['ALTER TABLE "test_db"."records" ADD COLUMNS (note string)']
+    assert statements == ["ALTER TABLE `test_db`.`records` ADD COLUMNS (`note` string)"]
 
 
 def test_added_column_sql_refuses_a_removed_column() -> None:
