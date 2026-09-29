@@ -166,6 +166,7 @@ def _run_create_table(
             partition_key_names=partition_key_names,
         ),
         workgroup=workgroup,
+        database=database,
     )
 
 
@@ -206,6 +207,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
                 athena_client=_athena_client,
                 sql=f"DROP TABLE IF EXISTS `{database}`.`{table}`",
                 workgroup=workgroup,
+                database=database,
             )
         return {"PhysicalResourceId": physical_id}
 
@@ -228,7 +230,12 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, str]:
             old_columns=old_columns,
             new_columns=records_columns(partition_key_names),
         ):
-            run_query(athena_client=_athena_client, sql=statement, workgroup=workgroup)
+            run_query(
+                athena_client=_athena_client,
+                sql=statement,
+                workgroup=workgroup,
+                database=database,
+            )
         return {"PhysicalResourceId": physical_id}
 
     _run_create_table(

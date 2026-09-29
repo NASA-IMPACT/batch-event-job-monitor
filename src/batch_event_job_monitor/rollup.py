@@ -379,6 +379,7 @@ def run_query(
     athena_client: AthenaClient,
     sql: str,
     workgroup: str,
+    database: str | None = None,
     poll_seconds: float = 1.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
@@ -392,6 +393,11 @@ def run_query(
         Statement to execute.
     workgroup : str
         Athena workgroup, which supplies the result location.
+    database : str or None, optional
+        Database to resolve unqualified names against. Every statement
+        this package generates is already qualified, so this only makes
+        the context explicit rather than leaving Athena to resolve the
+        query against whatever default the workgroup carries.
     poll_seconds : float, optional
         Delay between status polls. Defaults to 1.0.
     sleep : Callable[[float], None], optional
@@ -407,9 +413,11 @@ def run_query(
     AthenaQueryError
         If the query ends in FAILED or CANCELLED.
     """
+    context = {"QueryExecutionContext": {"Database": database}} if database else {}
     query_id = athena_client.start_query_execution(
         QueryString=sql,
         WorkGroup=workgroup,
+        **context,  # type: ignore[arg-type]
     )["QueryExecutionId"]
 
     while True:
