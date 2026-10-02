@@ -432,7 +432,7 @@ def test_rollup_workgroup_env_var_matches_the_tables_own_workgroup() -> None:
     assert len(workgroups) == 1
     (workgroup,) = workgroups.values()
     workgroup_name = workgroup["Properties"]["Name"]
-    assert workgroup_name == "RecordsRollup-workgroup"
+    assert workgroup_name == "TestStack-RecordsRollup-workgroup"
 
     functions = template.find_resources(
         "AWS::Lambda::Function",

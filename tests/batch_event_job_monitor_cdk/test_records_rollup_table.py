@@ -178,7 +178,7 @@ def test_ddl_custom_resource_receives_the_table_location_and_workgroup() -> None
             {
                 "Table": "records",
                 "Location": "s3://test-bucket/records-rollup/table/",
-                "Workgroup": "RecordsRollup-workgroup",
+                "Workgroup": "TestStack-RecordsRollup-workgroup",
             }
         ),
     )
@@ -191,7 +191,7 @@ def test_exposed_attributes_are_the_table_names_and_location() -> None:
     assert construct.inventory_table_name == "records-inventory"
     assert construct.table_location == "s3://test-bucket/records-rollup/table/"
     assert construct.inventory_location_s3path == INVENTORY_LOCATION
-    assert construct.workgroup_name == "RecordsRollup-workgroup"
+    assert construct.workgroup_name == "TestStack-RecordsRollup-workgroup"
     assert construct.workgroup is not None
     assert construct.partition_key_names == ["job_type", "tile_id"]
 
@@ -201,11 +201,41 @@ def test_a_workgroup_is_created_with_results_under_the_processing_bucket() -> No
     workgroups = template.find_resources("AWS::Athena::WorkGroup")
     assert len(workgroups) == 1
     (workgroup,) = workgroups.values()
-    assert workgroup["Properties"]["Name"] == "RecordsRollup-workgroup"
+    assert workgroup["Properties"]["Name"] == "TestStack-RecordsRollup-workgroup"
     output_location = workgroup["Properties"]["WorkGroupConfiguration"][
         "ResultConfiguration"
     ]["OutputLocation"]
     assert output_location == "s3://test-bucket/records-rollup/athena-results/"
+
+
+def test_default_workgroup_name_is_unique_per_stack() -> None:
+    """Workgroup names are account-wide, so two stacks must not collide."""
+    app = App()
+    names = []
+    for stack_name in ("hls-dev", "hls-prod"):
+        stack = Stack(app, stack_name)
+        database = glue.CfnDatabase(
+            stack,
+            "TestDatabase",
+            catalog_id="123456789012",
+            database_input=glue.CfnDatabase.DatabaseInputProperty(name="test_db"),
+        )
+        construct = RecordsRollupTable(
+            stack,
+            "RecordsRollup",
+            database=database,
+            database_name="test_db",
+            processing_bucket_name="test-bucket",
+            records_inventory_location_s3path=INVENTORY_LOCATION,
+            inventory_datetime_start=dt.datetime(2026, 1, 1, 1),
+            partition_keys=PARTITION_KEYS,
+        )
+        names.append(construct.workgroup_name)
+
+    assert names == [
+        "hls-dev-RecordsRollup-workgroup",
+        "hls-prod-RecordsRollup-workgroup",
+    ]
 
 
 def test_ddl_custom_resource_depends_on_the_created_workgroup() -> None:

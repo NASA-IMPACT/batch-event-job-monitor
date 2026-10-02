@@ -352,9 +352,10 @@ place this library departs from its pure `CfnTable` pattern.
 deploy loudly and requires manual intervention -- the handler reads the live table schema via Glue `GetTable` on every
 update to detect retypes by comparing the new schema against the catalog.
 
-**Workgroup:** When `workgroup_name` is None (the default), the construct creates its own Athena workgroup with query
-results stored under `s3://{processing_bucket_name}/athena-results/` and exposes it as the `workgroup` attribute. Pass
-an existing workgroup name to skip creating one; in that case the workgroup's query-results location is yours to manage.
+**Workgroup:** When `workgroup_name` is None (the default), the construct creates its own Athena workgroup, named
+`{stack_name}-{construct_id}-workgroup` so stacks sharing an account and region do not collide, with query results
+stored under `s3://{processing_bucket_name}/athena-results/` and exposes it as the `workgroup` attribute. Pass an
+existing workgroup name to skip creating one; in that case the workgroup's query-results location is yours to manage.
 Both `workgroup_name` (the resolved name) and `workgroup` (the created workgroup or None) are exposed as attributes.
 
 **Removal policy scope:** The `removal_policy` parameter governs only the Iceberg table. The staging and inventory

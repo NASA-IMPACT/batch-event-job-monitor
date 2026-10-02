@@ -16,6 +16,7 @@ from aws_cdk import (
     CustomResource,
     Duration,
     RemovalPolicy,
+    Stack,
     aws_athena as athena,
     aws_glue as glue,
     aws_iam as iam,
@@ -85,7 +86,8 @@ class RecordsRollupTable(Construct):
         Ordered partition keys, including the leading job_type entry.
     workgroup_name : str or None, optional
         Athena workgroup the DDL runs in. When None (the default), this
-        construct creates its own workgroup (exposed as ``workgroup``)
+        construct creates its own workgroup (exposed as ``workgroup``),
+        named ``{stack_name}-{construct_id}-workgroup``,
         with query results under ``s3://{processing_bucket_name}/
         athena-results/`` and orders the DDL custom resource after it.
         Pass an existing workgroup's name to skip creating one; in that
@@ -226,7 +228,9 @@ class RecordsRollupTable(Construct):
         if workgroup_name is not None:
             return workgroup_name, None
 
-        name = f"{self.node.id}-workgroup"
+        # Workgroup names are unique per account and region, so a name
+        # without the stack would collide across stages sharing an account.
+        name = f"{Stack.of(self).stack_name}-{self.node.id}-workgroup"
         workgroup = athena.CfnWorkGroup(
             self,
             "Workgroup",
