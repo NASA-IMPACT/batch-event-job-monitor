@@ -39,8 +39,9 @@ def submit_job(
     (e.g. a manual resubmission via the Batch console/CLI).
 
     Writes nothing to S3 -- the job-monitor Lambda derives all tracking
-    state purely from watching this submission's own SUBMITTED event on
-    the Batch event stream.
+    state purely from this submission's own job state change events on
+    the Batch event stream. Batch sends none for the submission itself,
+    so the job's first record is its first tracked status after it.
 
     Parameters
     ----------
@@ -81,8 +82,8 @@ def resubmit_job(
     submit_job.
 
     Writes nothing to S3 -- the job-monitor Lambda derives all tracking
-    state, including old_state, purely from watching this submission's own
-    SUBMITTED event on the Batch event stream.
+    state, including old_state, purely from this submission's own job
+    state change events on the Batch event stream.
 
     Parameters
     ----------

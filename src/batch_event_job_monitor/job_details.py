@@ -119,9 +119,9 @@ class JobDetails:
     ) -> ProcessingState:
         """Classify this job's status.
 
-        Called for every aws.batch job state change event, not only
-        terminal ones -- SUBMITTED/PENDING/RUNNABLE/STARTING/RUNNING map to
-        non-terminal ProcessingStates.
+        Called for every tracked aws.batch job state change event, not only
+        terminal ones -- PENDING/RUNNABLE/STARTING/RUNNING map to AWAITING.
+        SUBMITTED maps to SUBMITTED, though Batch sends no event for it.
 
         Parameters
         ----------
