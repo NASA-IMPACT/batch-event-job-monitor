@@ -268,9 +268,9 @@ The EventBridge target retries three times (`retry_attempts`) and then delivers 
 ### Tracked statuses
 
 AWS Batch sends a [job state change event](https://docs.aws.amazon.com/batch/latest/userguide/batch_job_events.html)
-each time a job changes [state](https://docs.aws.amazon.com/batch/latest/userguide/job_states.html) after submission. It
-sends none for the submission itself, so no event ever carries `SUBMITTED`. Each event the tracked rules match is
-appended to the job's canonical record:
+each time a job changes [state](https://docs.aws.amazon.com/batch/latest/userguide/job_states.html) after submission.
+Events are only sent for job status _changes_, so no event will be sent for `SUBMITTED` since it is the first status.
+Each event the tracked rules match is appended to the job's canonical record:
 
 | Batch status                                 | Recorded as                                                                 |
 | -------------------------------------------- | --------------------------------------------------------------------------- |
@@ -294,8 +294,8 @@ JobMonitorFunction(
 
 `PENDING` is only sent for a job waiting on dependencies or an array job's children, so a job without them goes straight
 to `RUNNABLE`. A failed attempt with Batch `retryStrategy` attempts left also returns to `RUNNABLE`, recording another
-`AWAITING`. `tracked_statuses` must include `SUCCEEDED` and `FAILED`, and may only name statuses in
-`BATCH_EVENT_STATUSES`; anything else fails at synth time.
+`AWAITING`. `tracked_statuses` must include `SUCCEEDED` and `FAILED`. Configuration is checked to ensure provided
+statuses are part of the `BATCH_EVENT_STATUSES` set, or the deploy will fail at synth time.
 
 ```python
 monitor = JobMonitorFunction(
