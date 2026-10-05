@@ -3,7 +3,8 @@
 Reusable AWS Batch job-monitoring components:
 
 - an S3-backed job log store
-- a Lambda-based job monitor core, tracking a job's full lifecycle (submission through terminal outcome)
+- a Lambda-based job monitor core, tracking each job from the state changes AWS Batch reports through to its terminal
+  outcome
 - CDK constructs for:
   - `ProcessingBucket`: the supporting processing bucket and its S3 Inventories
   - `MonitoringQueues`: the retry, dead-letter, and untracked-job queues
@@ -139,11 +140,11 @@ A job submitted to a monitored queue without those parameters runs perfectly and
 canonical record, no state pointer, no output-index entry, and no error. That is the failure mode a manual or backfill
 submission is most likely to hit.
 
-`JobMonitorFunction` creates a catch-all EventBridge rule per monitored Batch job queue, matching
-`SUBMITTED`/`SUCCEEDED`/`FAILED` events whose `bejm_job_type` parameter is absent. Those jobs go to two independent
-targets: the monitor Lambda, which emits an `UntrackedJobs` CloudWatch metric and a structured log line, and
-`queues.untracked_queue`, which keeps the raw event so the submission can be replayed once the caller is fixed. Alarm on
-the metric -- see [`docs/constructs.md`](docs/constructs.md#untracked-jobs).
+`JobMonitorFunction` creates a catch-all EventBridge rule per monitored Batch job queue, matching `SUCCEEDED`/`FAILED`
+events whose `bejm_job_type` parameter is absent. Those jobs go to two independent targets: the monitor Lambda, which
+emits an `UntrackedJobs` CloudWatch metric and a structured log line, and `queues.untracked_queue`, which keeps the raw
+event so the submission can be replayed once the caller is fixed. Alarm on the metric -- see
+[`docs/constructs.md`](docs/constructs.md#untracked-jobs).
 
 ## Library-only path
 

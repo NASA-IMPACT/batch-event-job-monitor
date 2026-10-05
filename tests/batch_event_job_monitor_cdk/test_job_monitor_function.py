@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from aws_cdk import (
     App,
     Size,
@@ -39,6 +40,7 @@ def _make_stack(
     *,
     queues: bool = False,
     job_type_configs: dict[str, JobTypeConfig] | None = None,
+    **kwargs: Any,
 ) -> tuple[Stack, JobMonitorFunction]:
     app = App()
     stack = Stack(app, "TestStack")
@@ -49,6 +51,7 @@ def _make_stack(
         processing_bucket=bucket,
         job_type_configs=job_type_configs or _ONE_JOB_TYPE_CONFIG,
         queues=MonitoringQueues(stack, "Queues") if queues else None,
+        **kwargs,
     )
     return stack, construct
 
@@ -218,11 +221,11 @@ class TestTrackedRule:
         stack, _ = _make_stack()
         assert len(_tracked_rules(Template.from_stack(stack))) == 1
 
-    def test_matches_all_batch_statuses(self) -> None:
+    def test_matches_every_status_batch_emits_by_default(self) -> None:
+        """Batch emits no event for submission, so SUBMITTED is not one."""
         stack, _ = _make_stack()
         [rule] = _tracked_rules(Template.from_stack(stack))
         assert rule["EventPattern"]["detail"]["status"] == [
-            "SUBMITTED",
             "PENDING",
             "RUNNABLE",
             "STARTING",
@@ -230,6 +233,30 @@ class TestTrackedRule:
             "SUCCEEDED",
             "FAILED",
         ]
+
+    def test_tracked_statuses_narrow_every_tracked_rule(self) -> None:
+        stack, _ = _make_stack(tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"])
+        [rule] = _tracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["status"] == [
+            "RUNNABLE",
+            "SUCCEEDED",
+            "FAILED",
+        ]
+
+    @pytest.mark.parametrize("missing", ["SUCCEEDED", "FAILED"])
+    def test_tracked_statuses_must_include_terminal_statuses(
+        self, missing: str
+    ) -> None:
+        statuses = [s for s in ("RUNNABLE", "SUCCEEDED", "FAILED") if s != missing]
+        with pytest.raises(ValueError, match=missing):
+            _make_stack(tracked_statuses=statuses)
+
+    @pytest.mark.parametrize("status", ["SUBMITTED", "BOGUS"])
+    def test_tracked_statuses_reject_statuses_batch_never_emits(
+        self, status: str
+    ) -> None:
+        with pytest.raises(ValueError, match=status):
+            _make_stack(tracked_statuses=[status, "SUCCEEDED", "FAILED"])
 
     def test_scoped_to_job_type_queue_and_job_definition(self) -> None:
         stack, _ = _make_stack()
@@ -272,14 +299,15 @@ class TestUntrackedRule:
         [rule] = _untracked_rules(Template.from_stack(stack))
         assert rule["EventPattern"]["detail"]["jobQueue"] == [_JOB_QUEUE_ARN]
 
-    def test_matches_submitted_and_terminal_statuses_only(self) -> None:
+    def test_matches_terminal_statuses_only(self) -> None:
         stack, _ = _make_stack()
         [rule] = _untracked_rules(Template.from_stack(stack))
-        assert rule["EventPattern"]["detail"]["status"] == [
-            "SUBMITTED",
-            "SUCCEEDED",
-            "FAILED",
-        ]
+        assert rule["EventPattern"]["detail"]["status"] == ["SUCCEEDED", "FAILED"]
+
+    def test_unaffected_by_tracked_statuses(self) -> None:
+        stack, _ = _make_stack(tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"])
+        [rule] = _untracked_rules(Template.from_stack(stack))
+        assert rule["EventPattern"]["detail"]["status"] == ["SUCCEEDED", "FAILED"]
 
     def test_targets_both_the_function_and_the_untracked_queue(self) -> None:
         stack, construct = _make_stack()

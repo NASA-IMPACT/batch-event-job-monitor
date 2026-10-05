@@ -13,6 +13,7 @@ subpackage.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from aws_cdk import (
@@ -28,23 +29,28 @@ from batch_event_job_monitor.models import PARAM_PREFIX, JobTypeConfig
 from batch_event_job_monitor_cdk.lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
 
-# Every Batch job lifecycle status. JobMonitorFunction tracks the full
-# lifecycle (not just terminal SUCCEEDED/FAILED), so ad hoc/backfill job
-# submissions are tracked correctly with no other library coordination.
-_ALL_BATCH_STATUSES = [
-    "SUBMITTED",
+BATCH_EVENT_STATUSES = (
     "PENDING",
     "RUNNABLE",
     "STARTING",
     "RUNNING",
     "SUCCEEDED",
     "FAILED",
-]
+)
+"""Every status AWS Batch sends a job state change event for.
 
-# Statuses the untracked-job catch-all rule matches. Enough to record that
-# an unmonitored job existed and how it ended, without the ~2x event volume
-# of the full lifecycle -- an untracked job has no state to track through.
-_UNTRACKED_BATCH_STATUSES = ["SUBMITTED", "SUCCEEDED", "FAILED"]
+SUBMITTED is a Batch job status but never an event: Batch creates no event
+for the initial submission, only for each later change of state. See
+https://docs.aws.amazon.com/batch/latest/userguide/batch_job_events.html
+"""
+
+# Terminal statuses every tracked rule must match: without them no job
+# reaches a terminal state, so nothing is retried or dead-lettered.
+_REQUIRED_TRACKED_STATUSES = ("SUCCEEDED", "FAILED")
+
+# Statuses the untracked-job catch-all rule matches. Enough to record how an
+# unmonitored job ended -- an untracked job has no state to track through.
+_UNTRACKED_BATCH_STATUSES = ["SUCCEEDED", "FAILED"]
 
 # EventBridge existence test on the one bejm_* parameter every monitored
 # job must carry. Splits each monitored queue's events into the tracked
@@ -108,6 +114,14 @@ class JobMonitorFunction(Construct):
     retry_attempts : int, optional
         EventBridge target retries before an event is sent to the
         EventBridge DLQ. Defaults to 3.
+    tracked_statuses : Sequence[str], optional
+        Batch statuses every tracked rule matches, and so the only statuses
+        that reach a job's canonical record. Defaults to
+        BATCH_EVENT_STATUSES. PENDING, RUNNABLE, STARTING, and RUNNING all
+        record as AWAITING, so e.g. ("RUNNABLE", "SUCCEEDED", "FAILED")
+        records one AWAITING event per job rather than up to four. Must
+        include SUCCEEDED and FAILED, and only statuses in
+        BATCH_EVENT_STATUSES. Does not affect the untracked rules.
     **kwargs : Any
         Additional keyword arguments forwarded to the Construct base class.
 
@@ -140,9 +154,12 @@ class JobMonitorFunction(Construct):
         memory_size: int = 256,
         timeout: Duration = Duration.minutes(1),
         retry_attempts: int = 3,
+        tracked_statuses: Sequence[str] = BATCH_EVENT_STATUSES,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        _validate_tracked_statuses(tracked_statuses)
 
         self.queues = queues or MonitoringQueues(self, "Queues")
 
@@ -192,7 +209,7 @@ class JobMonitorFunction(Construct):
                     source=["aws.batch"],
                     detail_type=["Batch Job State Change"],
                     detail={
-                        "status": _ALL_BATCH_STATUSES,
+                        "status": list(tracked_statuses),
                         "jobQueue": [config.job_queue_arn],
                         "jobDefinition": [{"prefix": f"{config.job_definition_arn}:"}],
                         "parameters": _JOB_TYPE_PARAM_PRESENT,
@@ -229,6 +246,29 @@ class JobMonitorFunction(Construct):
                 job_type_configs
             ).items()
         }
+
+
+def _validate_tracked_statuses(tracked_statuses: Sequence[str]) -> None:
+    """Reject statuses Batch never emits, and any list missing a terminal one.
+
+    Raises
+    ------
+    ValueError
+        If a status is not in BATCH_EVENT_STATUSES, or SUCCEEDED or FAILED
+        is absent.
+    """
+    unknown = [s for s in tracked_statuses if s not in BATCH_EVENT_STATUSES]
+    if unknown:
+        raise ValueError(
+            f"tracked_statuses {unknown} are not statuses AWS Batch sends events "
+            f"for; choose from {list(BATCH_EVENT_STATUSES)}"
+        )
+    missing = [s for s in _REQUIRED_TRACKED_STATUSES if s not in tracked_statuses]
+    if missing:
+        raise ValueError(
+            f"tracked_statuses must include {missing}: without terminal "
+            "statuses no job is ever recorded as finished"
+        )
 
 
 def _first_job_type_per_queue(

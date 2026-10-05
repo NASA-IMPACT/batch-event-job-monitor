@@ -5,7 +5,10 @@ from batch_event_job_monitor_cdk.athena_records_table import (
     AthenaRecordsTable,
 )
 from batch_event_job_monitor_cdk.athena_state_table import AthenaStateTable
-from batch_event_job_monitor_cdk.job_monitor_function import JobMonitorFunction
+from batch_event_job_monitor_cdk.job_monitor_function import (
+    BATCH_EVENT_STATUSES,
+    JobMonitorFunction,
+)
 from batch_event_job_monitor_cdk.job_resubmit_function import JobResubmitFunction
 from batch_event_job_monitor_cdk.job_type_config import (
     job_definition_family_arn,
@@ -18,6 +21,7 @@ from batch_event_job_monitor_cdk.records_rollup_function import RecordsRollupFun
 from batch_event_job_monitor_cdk.records_rollup_table import RecordsRollupTable
 
 __all__ = [
+    "BATCH_EVENT_STATUSES",
     "AthenaOutputsTable",
     "AthenaRecordsTable",
     "AthenaStateTable",
