@@ -1,7 +1,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from batch_event_job_monitor.job_details import JobDetails
-from batch_event_job_monitor.lambda_core import monitor_job
+from batch_event_job_monitor.lambda_core import monitor_job, parse_event_time
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
     PARAM_PREFIX,
@@ -48,6 +48,7 @@ __all__ = [
     "RetryPolicy",
     "S3RecordStore",
     "monitor_job",
+    "parse_event_time",
     "record_untracked_job",
     "resubmit_job",
     "submit_job",

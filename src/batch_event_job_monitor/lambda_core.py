@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from batch_event_job_monitor.job_details import JobDetails
@@ -19,13 +18,10 @@ from batch_event_job_monitor.models import (
 )
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def monitor_job(
     *,
     detail: dict[str, Any],
+    event_time: datetime,
     log_store: S3RecordStore,
     job_group: JobGroup,
     retry_policy: RetryPolicy,
@@ -33,7 +29,6 @@ def monitor_job(
     dlq_url: str | None,
     sqs_client: Any,
     exit_code_outcomes: ExitCodeOutcomes | None = None,
-    now: Callable[[], datetime] | None = None,
 ) -> ProcessingState:
     """Classify and record a Batch job state change event, routing failures.
 
@@ -59,6 +54,10 @@ def monitor_job(
     detail : dict[str, Any]
         The EventBridge "detail" object for an aws.batch job state change
         event.
+    event_time : datetime
+        When the state change happened, recorded as the canonical event's
+        timestamp. Typically the EventBridge event's top-level "time" (see
+        `parse_event_time`).
     log_store : S3RecordStore
         The log store used to record the canonical event, state pointer,
         and output index.
@@ -82,16 +81,12 @@ def monitor_job(
         Deploy-time, job_type-specific exit-code taxonomy (see
         JobTypeConfig) checked before the built-in spot-interruption
         classification fallback.
-    now : Callable[[], datetime] or None, optional
-        Callable returning the current time, used for the recorded event
-        timestamp. Defaults to `datetime.now(timezone.utc)`.
 
     Returns
     -------
     ProcessingState
         The classified processing state for this event.
     """
-    current_time = now or _utcnow
     outcomes = exit_code_outcomes or ExitCodeOutcomes()
     states = outcomes.states()
 
@@ -126,7 +121,7 @@ def monitor_job(
 
         event = ProcessingEventRecord(
             state=new_state.name,
-            timestamp=current_time().isoformat(),
+            timestamp=event_time.isoformat(),
             batch_job_id=job.job_id,
             exit_code=job.exit_code,
         )
@@ -188,3 +183,14 @@ def monitor_job(
             sqs_client.send_message(QueueUrl=dlq_url, MessageBody=message_body)
 
     return new_state
+
+
+def parse_event_time(time: str) -> datetime:
+    """Parse an EventBridge event's top-level "time" into an aware datetime.
+
+    Parameters
+    ----------
+    time : str
+        The event's "time", e.g. "2024-06-15T12:00:00Z".
+    """
+    return datetime.fromisoformat(time)
