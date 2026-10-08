@@ -254,8 +254,8 @@ Bundles its own Lambda handler and wires two kinds of EventBridge rule to it.
 
 **Tracked rules -- one per job_type.** Scoped to that job_type's own Batch job queue and job definition (matching the
 job definition by prefix, since the event's `jobDefinition` is revision-suffixed), for the statuses in its
-`JobTypeConfig.tracked_statuses`, and requiring `bejm_job_type` to be present. The bundled handler decodes the `bejm_*` parameters and
-calls `monitor_job`.
+`JobTypeConfig.tracked_statuses`, and requiring `bejm_job_type` to be present. The bundled handler decodes the `bejm_*`
+parameters and calls `monitor_job`.
 
 **Catch-all rules -- one per distinct Batch job queue.** Scoped to the queue only, for `SUCCEEDED`/`FAILED`, matching
 jobs where `bejm_job_type` is _absent_. See [untracked jobs](#untracked-jobs) below.
