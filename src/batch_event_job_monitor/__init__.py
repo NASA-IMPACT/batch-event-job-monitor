@@ -4,6 +4,7 @@ from batch_event_job_monitor.job_details import JobDetails
 from batch_event_job_monitor.lambda_core import monitor_job, parse_event_time
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
+    BATCH_EVENT_STATUSES,
     PARAM_PREFIX,
     ExitCodeOutcome,
     ExitCodeOutcomes,
@@ -31,6 +32,7 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 __all__ = [
+    "BATCH_EVENT_STATUSES",
     "DEFAULT_METRIC_NAMESPACE",
     "PARAM_PREFIX",
     "UNTRACKED_JOBS_METRIC",

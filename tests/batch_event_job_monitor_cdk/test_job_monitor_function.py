@@ -20,6 +20,7 @@ from aws_cdk import (
 from aws_cdk.assertions import Match, Template
 
 from batch_event_job_monitor.models import (
+    BATCH_EVENT_STATUSES,
     ExitCodeOutcome,
     ExitCodeOutcomes,
     JobTypeConfig,
@@ -37,6 +38,16 @@ _ONE_JOB_TYPE_CONFIG = {
         job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
     )
 }
+
+
+def _tracking(*statuses: str) -> dict[str, JobTypeConfig]:
+    return {
+        "monthly-composite": JobTypeConfig(
+            job_queue_arn=_JOB_QUEUE_ARN,
+            job_definition_arn=_JOB_DEFINITION_ARN,
+            tracked_statuses=statuses,
+        )
+    }
 
 
 def _make_stack(
@@ -237,8 +248,10 @@ class TestTrackedRule:
             "FAILED",
         ]
 
-    def test_tracked_statuses_narrow_every_tracked_rule(self) -> None:
-        stack, _ = _make_stack(tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"])
+    def test_tracked_statuses_narrow_the_tracked_rule(self) -> None:
+        stack, _ = _make_stack(
+            job_type_configs=_tracking("RUNNABLE", "SUCCEEDED", "FAILED")
+        )
         [rule] = _tracked_rules(Template.from_stack(stack))
         assert rule["EventPattern"]["detail"]["status"] == [
             "RUNNABLE",
@@ -251,15 +264,15 @@ class TestTrackedRule:
         self, missing: str
     ) -> None:
         statuses = [s for s in ("RUNNABLE", "SUCCEEDED", "FAILED") if s != missing]
-        with pytest.raises(ValueError, match=missing):
-            _make_stack(tracked_statuses=statuses)
+        with pytest.raises(ValueError, match=f"'monthly-composite'.*{missing}"):
+            _make_stack(job_type_configs=_tracking(*statuses))
 
     @pytest.mark.parametrize("status", ["SUBMITTED", "BOGUS"])
     def test_tracked_statuses_reject_statuses_batch_never_emits(
         self, status: str
     ) -> None:
-        with pytest.raises(ValueError, match=status):
-            _make_stack(tracked_statuses=[status, "SUCCEEDED", "FAILED"])
+        with pytest.raises(ValueError, match=f"'monthly-composite'.*{status}"):
+            _make_stack(job_type_configs=_tracking(status, "SUCCEEDED", "FAILED"))
 
     def test_scoped_to_job_type_queue_and_job_definition(self) -> None:
         stack, _ = _make_stack()
@@ -308,7 +321,9 @@ class TestUntrackedRule:
         assert rule["EventPattern"]["detail"]["status"] == ["SUCCEEDED", "FAILED"]
 
     def test_unaffected_by_tracked_statuses(self) -> None:
-        stack, _ = _make_stack(tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"])
+        stack, _ = _make_stack(
+            job_type_configs=_tracking("RUNNABLE", "SUCCEEDED", "FAILED")
+        )
         [rule] = _untracked_rules(Template.from_stack(stack))
         assert rule["EventPattern"]["detail"]["status"] == ["SUCCEEDED", "FAILED"]
 
@@ -362,6 +377,23 @@ class TestMultipleJobTypes:
         template = Template.from_stack(stack)
         assert len(_tracked_rules(template)) == 2
         assert set(construct.rules) == {"monthly-composite", "granule-processing"}
+
+    def test_each_tracked_rule_matches_its_own_tracked_statuses(self) -> None:
+        configs = self._job_type_configs()
+        configs["granule-processing"] = dataclasses.replace(
+            configs["granule-processing"], tracked_statuses=("SUCCEEDED", "FAILED")
+        )
+        stack, _ = _make_stack(job_type_configs=configs)
+        statuses = {
+            rule["EventPattern"]["detail"]["jobQueue"][0]: rule["EventPattern"][
+                "detail"
+            ]["status"]
+            for rule in _tracked_rules(Template.from_stack(stack))
+        }
+        assert statuses == {
+            _JOB_QUEUE_ARN: list(BATCH_EVENT_STATUSES),
+            self._OTHER_JOB_QUEUE_ARN: ["SUCCEEDED", "FAILED"],
+        }
 
     def test_each_tracked_rule_scoped_to_its_own_job_type(self) -> None:
         stack, _ = _make_stack(job_type_configs=self._job_type_configs())
