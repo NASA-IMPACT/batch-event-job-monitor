@@ -253,9 +253,9 @@ than through a role this library grants -- that key needs its own key-policy gra
 Bundles its own Lambda handler and wires two kinds of EventBridge rule to it.
 
 **Tracked rules -- one per job_type.** Scoped to that job_type's own Batch job queue and job definition (matching the
-job definition by prefix, since the event's `jobDefinition` is revision-suffixed), for the statuses in
-`tracked_statuses`, and requiring `bejm_job_type` to be present. The bundled handler decodes the `bejm_*` parameters and
-calls `monitor_job`.
+job definition by prefix, since the event's `jobDefinition` is revision-suffixed), for the statuses in its
+`JobTypeConfig.tracked_statuses`, and requiring `bejm_job_type` to be present. The bundled handler decodes the `bejm_*`
+parameters and calls `monitor_job`.
 
 **Catch-all rules -- one per distinct Batch job queue.** Scoped to the queue only, for `SUCCEEDED`/`FAILED`, matching
 jobs where `bejm_job_type` is _absent_. See [untracked jobs](#untracked-jobs) below.
@@ -268,9 +268,9 @@ The EventBridge target retries three times (`retry_attempts`) and then delivers 
 ### Tracked statuses
 
 AWS Batch sends a [job state change event](https://docs.aws.amazon.com/batch/latest/userguide/batch_job_events.html)
-each time a job changes [state](https://docs.aws.amazon.com/batch/latest/userguide/job_states.html) after submission. It
-sends none for the submission itself, so no event ever carries `SUBMITTED`. Each event the tracked rules match is
-appended to the job's canonical record:
+each time a job changes [state](https://docs.aws.amazon.com/batch/latest/userguide/job_states.html) after submission.
+Events are only sent for job status _changes_, so no event will be sent for `SUBMITTED` since it is the first status.
+Each event the tracked rules match is appended to the job's canonical record:
 
 | Batch status                                 | Recorded as                                                                 |
 | -------------------------------------------- | --------------------------------------------------------------------------- |
@@ -278,24 +278,28 @@ appended to the job's canonical record:
 | `SUCCEEDED`                                  | `SUCCESS`                                                                   |
 | `FAILED`                                     | `FAILURE_RETRYABLE`, `FAILURE_NONRETRYABLE`, or an `ExitCodeOutcomes` state |
 
-`tracked_statuses` defaults to `BATCH_EVENT_STATUSES`, every status Batch sends an event for. A job that queues, starts,
-and runs then records up to four `AWAITING` events before its terminal one. To record one `AWAITING` per job -- when the
-job became runnable -- and roughly halve the monitor's invocations, track only:
+Each job_type sets its own `tracked_statuses` on its `JobTypeConfig`, defaulting to `BATCH_EVENT_STATUSES`, every status
+Batch sends an event for. A job that queues, starts, and runs then records up to four `AWAITING` events before its
+terminal one. To record one `AWAITING` per job -- when the job became runnable -- and roughly halve the monitor's
+invocations for that job_type, track only:
 
 ```python
-JobMonitorFunction(
-    self,
-    "JobMonitor",
-    processing_bucket=bucket,
-    job_type_configs=configs,
-    tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"],
-)
+job_type_configs = {
+    "monthly-composite": job_type_config(
+        job_queue=job_queue,
+        job_definition=job_definition,
+        tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"],
+    ),
+}
 ```
+
+A job_type whose in-flight states you never query -- e.g. one you only observe, with `route_failures=False` -- can track
+just `["SUCCEEDED", "FAILED"]`.
 
 `PENDING` is only sent for a job waiting on dependencies or an array job's children, so a job without them goes straight
 to `RUNNABLE`. A failed attempt with Batch `retryStrategy` attempts left also returns to `RUNNABLE`, recording another
-`AWAITING`. `tracked_statuses` must include `SUCCEEDED` and `FAILED`, and may only name statuses in
-`BATCH_EVENT_STATUSES`; anything else fails at synth time.
+`AWAITING`. Each job_type's `tracked_statuses` must include `SUCCEEDED` and `FAILED`. Configuration is checked to ensure
+provided statuses are part of the `BATCH_EVENT_STATUSES` set, or the deploy will fail at synth time.
 
 ```python
 monitor = JobMonitorFunction(

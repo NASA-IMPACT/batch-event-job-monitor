@@ -8,9 +8,16 @@ typed CDK Batch refs get reduced to those strings.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aws_cdk import ArnFormat, Stack, Token, aws_batch as batch
 
-from batch_event_job_monitor.models import ExitCodeOutcomes, JobTypeConfig, RetryPolicy
+from batch_event_job_monitor.models import (
+    BATCH_EVENT_STATUSES,
+    ExitCodeOutcomes,
+    JobTypeConfig,
+    RetryPolicy,
+)
 
 
 def job_definition_family_arn(job_definition: batch.IJobDefinition) -> str:
@@ -49,6 +56,7 @@ def job_type_config(
     exit_code_outcomes: ExitCodeOutcomes | None = None,
     requires_bejm_parameters: bool = True,
     route_failures: bool = True,
+    tracked_statuses: Sequence[str] = BATCH_EVENT_STATUSES,
 ) -> JobTypeConfig:
     """Build a JobTypeConfig from typed CDK Batch refs.
 
@@ -64,4 +72,5 @@ def job_type_config(
         exit_code_outcomes=exit_code_outcomes or ExitCodeOutcomes(),
         requires_bejm_parameters=requires_bejm_parameters,
         route_failures=route_failures,
+        tracked_statuses=tuple(tracked_statuses),
     )

@@ -143,6 +143,21 @@ class RetryPolicy:
 
 
 PARAM_PREFIX = "bejm_"
+
+BATCH_EVENT_STATUSES: tuple[str, ...] = (
+    "PENDING",
+    "RUNNABLE",
+    "STARTING",
+    "RUNNING",
+    "SUCCEEDED",
+    "FAILED",
+)
+"""Every status AWS Batch sends a job state change event for.
+
+SUBMITTED is a Batch job status but never an event: Batch creates no event
+for the initial submission, only for each later change of state. See
+https://docs.aws.amazon.com/batch/latest/userguide/batch_job_events.html
+"""
 _MAX_BATCH_JOB_NAME_LENGTH = 128
 _JOB_NAME_HASH_LENGTH = 8
 
@@ -404,6 +419,14 @@ class JobTypeConfig:
         queue. Defaults to True. Set False for jobs this system observes
         but does not own, so their failures are recorded without being
         resubmitted or dead-lettered.
+    tracked_statuses : tuple[str, ...], optional
+        Batch statuses this job_type's tracked EventBridge rule matches, and
+        so the only statuses that reach its jobs' canonical records.
+        Defaults to BATCH_EVENT_STATUSES. PENDING, RUNNABLE, STARTING, and
+        RUNNING all record as AWAITING, so e.g. ("RUNNABLE", "SUCCEEDED",
+        "FAILED") records one AWAITING event per job rather than up to four.
+        Must include SUCCEEDED and FAILED, and only statuses in
+        BATCH_EVENT_STATUSES -- JobMonitorFunction checks at synth time.
 
     JobMonitorFunction resolves one JobTypeConfig per job_type from a
     single deploy-time env var; there is no per-job or per-invocation
@@ -416,6 +439,7 @@ class JobTypeConfig:
     exit_code_outcomes: ExitCodeOutcomes = field(default_factory=ExitCodeOutcomes)
     requires_bejm_parameters: bool = True
     route_failures: bool = True
+    tracked_statuses: tuple[str, ...] = BATCH_EVENT_STATUSES
 
     def to_dict(self) -> dict[str, Any]:
         """Encode for embedding in JobMonitorFunction's deploy-time JSON."""
@@ -426,6 +450,7 @@ class JobTypeConfig:
             "exit_code_outcomes": self.exit_code_outcomes.to_dict(),
             "requires_bejm_parameters": self.requires_bejm_parameters,
             "route_failures": self.route_failures,
+            "tracked_statuses": list(self.tracked_statuses),
         }
 
     @classmethod
@@ -440,6 +465,7 @@ class JobTypeConfig:
             ),
             requires_bejm_parameters=data.get("requires_bejm_parameters", True),
             route_failures=data.get("route_failures", True),
+            tracked_statuses=tuple(data.get("tracked_statuses", BATCH_EVENT_STATUSES)),
         )
 
 

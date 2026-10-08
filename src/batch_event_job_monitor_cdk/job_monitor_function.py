@@ -30,24 +30,13 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-from batch_event_job_monitor.models import PARAM_PREFIX, JobTypeConfig
+from batch_event_job_monitor.models import (
+    BATCH_EVENT_STATUSES,
+    PARAM_PREFIX,
+    JobTypeConfig,
+)
 from batch_event_job_monitor_cdk.lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
-
-BATCH_EVENT_STATUSES = (
-    "PENDING",
-    "RUNNABLE",
-    "STARTING",
-    "RUNNING",
-    "SUCCEEDED",
-    "FAILED",
-)
-"""Every status AWS Batch sends a job state change event for.
-
-SUBMITTED is a Batch job status but never an event: Batch creates no event
-for the initial submission, only for each later change of state. See
-https://docs.aws.amazon.com/batch/latest/userguide/batch_job_events.html
-"""
 
 # Terminal statuses every tracked rule must match: without them no job
 # reaches a terminal state, so nothing is retried or dead-lettered.
@@ -138,14 +127,6 @@ class JobMonitorFunction(Construct):
         override the default. Ignored otherwise.
     environment : dict[str, str] or None, optional
         Additional environment variables for a custom handler.
-    tracked_statuses : Sequence[str], optional
-        Batch statuses every tracked rule matches, and so the only statuses
-        that reach a job's canonical record. Defaults to
-        BATCH_EVENT_STATUSES. PENDING, RUNNABLE, STARTING, and RUNNING all
-        record as AWAITING, so e.g. ("RUNNABLE", "SUCCEEDED", "FAILED")
-        records one AWAITING event per job rather than up to four. Must
-        include SUCCEEDED and FAILED, and only statuses in
-        BATCH_EVENT_STATUSES. Does not affect the untracked rules.
     **kwargs : Any
         Additional keyword arguments forwarded to the Construct base class.
 
@@ -179,7 +160,6 @@ class JobMonitorFunction(Construct):
         memory_size: int = 256,
         timeout: Duration = Duration.minutes(1),
         retry_attempts: int = 3,
-        tracked_statuses: Sequence[str] = BATCH_EVENT_STATUSES,
         entry: str | None = None,
         index: str | None = None,
         handler: str = "handler",
@@ -189,7 +169,8 @@ class JobMonitorFunction(Construct):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        _validate_tracked_statuses(tracked_statuses)
+        for job_type, config in job_type_configs.items():
+            _validate_tracked_statuses(job_type, config.tracked_statuses)
         _validate_handler(job_type_configs, entry=entry, index=index)
 
         self.queues = queues or MonitoringQueues(self, "Queues")
@@ -262,7 +243,7 @@ class JobMonitorFunction(Construct):
                     source=["aws.batch"],
                     detail_type=["Batch Job State Change"],
                     detail={
-                        "status": list(tracked_statuses),
+                        "status": list(config.tracked_statuses),
                         "jobQueue": [config.job_queue_arn],
                         "jobDefinition": [{"prefix": f"{config.job_definition_arn}:"}],
                         **(
@@ -309,7 +290,7 @@ class JobMonitorFunction(Construct):
         }
 
 
-def _validate_tracked_statuses(tracked_statuses: Sequence[str]) -> None:
+def _validate_tracked_statuses(job_type: str, tracked_statuses: Sequence[str]) -> None:
     """Reject statuses Batch never emits, and any list missing a terminal one.
 
     Raises
@@ -321,14 +302,14 @@ def _validate_tracked_statuses(tracked_statuses: Sequence[str]) -> None:
     unknown = [s for s in tracked_statuses if s not in BATCH_EVENT_STATUSES]
     if unknown:
         raise ValueError(
-            f"tracked_statuses {unknown} are not statuses AWS Batch sends events "
-            f"for; choose from {list(BATCH_EVENT_STATUSES)}"
+            f"job_type {job_type!r}: tracked_statuses {unknown} are not statuses "
+            f"AWS Batch sends events for; choose from {list(BATCH_EVENT_STATUSES)}"
         )
     missing = [s for s in _REQUIRED_TRACKED_STATUSES if s not in tracked_statuses]
     if missing:
         raise ValueError(
-            f"tracked_statuses must include {missing}: without terminal "
-            "statuses no job is ever recorded as finished"
+            f"job_type {job_type!r}: tracked_statuses must include {missing}: "
+            "without terminal statuses no job is ever recorded as finished"
         )
 
 

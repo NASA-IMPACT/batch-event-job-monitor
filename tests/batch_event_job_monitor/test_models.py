@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from batch_event_job_monitor.models import (
+    BATCH_EVENT_STATUSES,
     ExitCodeOutcome,
     ExitCodeOutcomes,
     ExitCodeOutcomesBuilder,
@@ -626,6 +627,7 @@ class TestJobTypeConfig:
         assert config.exit_code_outcomes == ExitCodeOutcomes()
         assert config.requires_bejm_parameters is True
         assert config.route_failures is True
+        assert config.tracked_statuses == BATCH_EVENT_STATUSES
 
     def test_to_dict_from_dict_round_trips(self) -> None:
         config = JobTypeConfig(
@@ -637,6 +639,7 @@ class TestJobTypeConfig:
             ),
             requires_bejm_parameters=False,
             route_failures=False,
+            tracked_statuses=("RUNNABLE", "SUCCEEDED", "FAILED"),
         )
         assert JobTypeConfig.from_dict(config.to_dict()) == config
 
