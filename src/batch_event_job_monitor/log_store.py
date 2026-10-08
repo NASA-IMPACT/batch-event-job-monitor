@@ -583,9 +583,7 @@ class S3RecordStore:
         job_type: str,
         partition_fields: dict[str, str],
         input_entity_ids: Iterable[str],
-        output_entity_id: str,
         batch_job_id: str,
-        states: Iterable[ProcessingState] = BASELINE_PROCESSING_STATES,
     ) -> int:
         """Infer the attempt a Batch job is, for a job carrying no attempt.
 
@@ -596,10 +594,14 @@ class S3RecordStore:
         EventBridge deliveries, and out-of-order events all land on one
         canonical record:
 
-        - an entity whose latest attempt's canonical record carries this
-          batch_job_id has already seen this job -- that attempt is reused;
+        - an entity with a canonical record carrying this batch_job_id has
+          already seen this job -- that record's attempt is reused, even
+          when a later attempt has since been recorded;
         - otherwise this job is the next attempt after the furthest-along
-          entity's (1 for brand-new entities), as in next_group_attempt.
+          entity's (1 for brand-new entities).
+
+        Reads the entities' canonical records, not their state pointers, so
+        every attempt counts whatever state it ended in.
 
         Parameters
         ----------
@@ -609,48 +611,47 @@ class S3RecordStore:
             Ordered partition key/value pairs.
         input_entity_ids : Iterable[str]
             The processed entity identifiers for this job group.
-        output_entity_id : str
-            The output entity identifier, needed to build each entity's
-            canonical record key.
         batch_job_id : str
             The AWS Batch job id the event is for.
-        states : Iterable[ProcessingState], optional
-            The bounded set of states to check -- see find_state_pointer.
 
         Returns
         -------
         int
             The attempt number this Batch job's events are recorded under.
         """
-        states = tuple(states)
         next_attempt = 1
         for input_entity_id in input_entity_ids:
-            active = self.find_active_pointer(
+            recorded = self._recorded_attempts(
                 job_type=job_type,
                 partition_fields=partition_fields,
                 input_entity_id=input_entity_id,
-                states=states,
             )
-            if active is None:
-                continue
-            _, attempt = active
-            context = JobContext(
-                job_type=job_type,
-                partition_fields=partition_fields,
-                input_entity_id=input_entity_id,
-                output_entity_id=output_entity_id,
-                attempt=attempt,
-            )
-            if self._canonical_batch_job_id(context) == batch_job_id:
-                return attempt
-            next_attempt = max(next_attempt, attempt + 1)
+            for attempt, key in recorded:
+                if self._canonical_batch_job_id(key) == batch_job_id:
+                    return attempt
+                next_attempt = max(next_attempt, attempt + 1)
         return next_attempt
 
-    def _canonical_batch_job_id(self, context: JobContext) -> str | None:
+    def _recorded_attempts(
+        self, *, job_type: str, partition_fields: dict[str, str], input_entity_id: str
+    ) -> list[tuple[int, str]]:
+        """(attempt, key) of each of an entity's canonical records, newest first."""
+        prefix = (
+            f"{self.key_prefix}records/job_type={job_type}/"
+            f"{_render_partition(partition_fields)}input_entity_id={input_entity_id}/"
+        )
+        recorded: list[tuple[int, str]] = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                name = obj["Key"][len(prefix) :]
+                if name.endswith(".json") and name[: -len(".json")].isdigit():
+                    recorded.append((int(name[: -len(".json")]), obj["Key"]))
+        return sorted(recorded, reverse=True)
+
+    def _canonical_batch_job_id(self, key: str) -> str | None:
         try:
-            resp = self.client.get_object(
-                Bucket=self.bucket, Key=self.canonical_key(context)
-            )
+            resp = self.client.get_object(Bucket=self.bucket, Key=key)
         except ClientError as exc:
             if exc.response["Error"]["Code"] != "NoSuchKey":
                 raise

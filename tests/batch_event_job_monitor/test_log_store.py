@@ -632,16 +632,18 @@ class TestAttemptForBatchJob:
     OTHER_ENTITY_ID = "12TVK_2024-06_twin"
 
     def _record(
-        self, store: S3RecordStore, *, batch_job_id: str, attempt: int, **ctx: object
+        self,
+        store: S3RecordStore,
+        *,
+        batch_job_id: str,
+        attempt: int,
+        state: str = "SUCCESS",
+        **ctx: object,
     ) -> None:
-        context = make_context(attempt=attempt, **ctx)
         store.append_canonical_event(
-            context=context,
-            event=ProcessingEventRecord(state="SUCCESS", timestamp="t"),
+            context=make_context(attempt=attempt, **ctx),
+            event=ProcessingEventRecord(state=state, timestamp="t"),
             batch_job_id=batch_job_id,
-        )
-        store.write_state_pointer(
-            context=context, new_state=ProcessingStates.SUCCESS, old_state=None
         )
 
     def _attempt(
@@ -654,7 +656,6 @@ class TestAttemptForBatchJob:
             job_type=JOB_TYPE,
             partition_fields=TILE_MONTH_PARTITION,
             input_entity_ids=input_entity_ids or [INPUT_ENTITY_ID],
-            output_entity_id=OUTPUT_ENTITY_ID,
             batch_job_id=batch_job_id,
         )
 
@@ -695,15 +696,46 @@ class TestAttemptForBatchJob:
         )
         assert attempt == 2
 
-    def test_pointer_without_a_record_is_the_next_attempt(
+    def test_late_event_for_a_superseded_job_reuses_its_own_attempt(
+        self, store: S3RecordStore
+    ) -> None:
+        self._record(store, batch_job_id="job-1", attempt=1)
+        self._record(store, batch_job_id="job-2", attempt=2)
+        assert self._attempt(store, "job-1") == 1
+
+    def test_attempts_in_a_job_types_own_states_count(
+        self, store: S3RecordStore
+    ) -> None:
+        self._record(store, batch_job_id="job-1", attempt=1, state="CLOUDY")
+        assert self._attempt(store, "job-2") == 2
+
+    def test_a_pointer_without_a_record_does_not_count(
         self, store: S3RecordStore
     ) -> None:
         store.write_state_pointer(
             context=make_context(attempt=1),
-            new_state=ProcessingStates.SUCCESS,
+            new_state=ProcessingStates.AWAITING,
             old_state=None,
         )
-        assert self._attempt(store, "job-2") == 2
+        assert self._attempt(store, "job-1") == 1
+
+    def test_attempts_past_999_are_ordered_numerically(
+        self, store: S3RecordStore
+    ) -> None:
+        self._record(store, batch_job_id="job-999", attempt=999)
+        self._record(store, batch_job_id="job-1000", attempt=1000)
+        assert self._attempt(store, "job-1001") == 1001
+
+    def test_an_entity_id_prefixing_another_is_kept_separate(
+        self, store: S3RecordStore
+    ) -> None:
+        self._record(
+            store,
+            batch_job_id="job-1",
+            attempt=1,
+            input_entity_id=f"{INPUT_ENTITY_ID}-longer",
+        )
+        assert self._attempt(store, "job-2") == 1
 
 
 class TestWriteStatePointerCrossAttempt:
