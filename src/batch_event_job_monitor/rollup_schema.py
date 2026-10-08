@@ -25,6 +25,15 @@ _BODY_COLUMNS: list[tuple[str, str]] = [
     ("log_stream_name", "string"),
 ]
 
+# ISO 8601 strings in the canonical record and the staging table, typed
+# timestamps in the Iceberg table so durations can be computed in SQL.
+_TIMESTAMP_COLUMNS = (
+    "last_event_timestamp",
+    "created_at",
+    "started_at",
+    "stopped_at",
+)
+
 
 def key_columns(partition_key_names: list[str]) -> list[str]:
     """Natural-key column names, in order.
@@ -58,7 +67,7 @@ def records_columns(partition_key_names: list[str]) -> list[tuple[str, str]]:
     return [
         *((name, "string") for name in partition_key_names),
         *_BODY_COLUMNS,
-        ("last_event_timestamp", "timestamp"),
+        *((name, "timestamp") for name in _TIMESTAMP_COLUMNS),
         ("source_key", "string"),
         ("rolled_up_at", "timestamp"),
     ]
@@ -67,9 +76,9 @@ def records_columns(partition_key_names: list[str]) -> list[tuple[str, str]]:
 def staging_columns(partition_key_names: list[str]) -> list[tuple[str, str]]:
     """(name, Athena type) pairs for the NDJSON staging table.
 
-    Differs from the Iceberg table in two ways: last_event_timestamp stays a
-    string because the JSON SerDe does not parse timestamps, and rolled_up_at
-    is absent because the MERGE sets it.
+    Differs from the Iceberg table in two ways: its timestamp columns stay
+    strings because the JSON SerDe does not parse timestamps, and
+    rolled_up_at is absent because the MERGE sets it.
 
     Parameters
     ----------
@@ -84,7 +93,7 @@ def staging_columns(partition_key_names: list[str]) -> list[tuple[str, str]]:
     return [
         *((name, "string") for name in partition_key_names),
         *_BODY_COLUMNS,
-        ("last_event_timestamp", "string"),
+        *((name, "string") for name in _TIMESTAMP_COLUMNS),
         ("source_key", "string"),
     ]
 
@@ -139,12 +148,12 @@ class InvalidRunId(ValueError):
 
 
 def _staging_expression(name: str) -> str:
-    if name == "last_event_timestamp":
+    if name in _TIMESTAMP_COLUMNS:
         # The Iceberg column is a plain (zone-naive) timestamp, but
         # from_iso8601_timestamp() returns timestamp(3) with time zone.
         # Trino coerces naive -> zoned implicitly, not the reverse, so the
         # explicit CAST is required for this assignment to type-check.
-        return 'CAST(from_iso8601_timestamp(s."last_event_timestamp") AS timestamp(6))'
+        return f'CAST(from_iso8601_timestamp(s."{name}") AS timestamp(6))'
     return f's."{name}"'
 
 

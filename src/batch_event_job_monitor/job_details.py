@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from batch_event_job_monitor.models import (
@@ -27,6 +28,12 @@ _REQUIRED_PARAM_KEYS = (
 # Non-terminal Batch statuses, collapsed to AWAITING -- the distinction
 # between them (queueing vs. actually running) is not tracked.
 _AWAITING_STATUSES = frozenset({"PENDING", "RUNNABLE", "STARTING", "RUNNING"})
+
+
+def _from_epoch_ms(value: int | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
 
 
 @dataclass
@@ -98,6 +105,38 @@ class JobDetails:
                 return last_container.get("logStreamName")
 
         return None
+
+    @property
+    def created_at(self) -> datetime | None:
+        """When the job was submitted to Batch."""
+        return _from_epoch_ms(self._typed_raw.get("createdAt"))
+
+    @property
+    def started_at(self) -> datetime | None:
+        """When the job started running, checking the top level then the last
+        attempt.
+
+        None until a container starts running, and for a job that never does.
+        """
+        started_at = self._typed_raw.get("startedAt")
+        if started_at is None:
+            attempts = self._typed_raw.get("attempts")
+            if attempts:
+                started_at = attempts[-1].get("startedAt")
+        return _from_epoch_ms(started_at)
+
+    @property
+    def stopped_at(self) -> datetime | None:
+        """When the job stopped, checking the top level then the last attempt.
+
+        None until the job reaches SUCCEEDED or FAILED.
+        """
+        stopped_at = self._typed_raw.get("stoppedAt")
+        if stopped_at is None:
+            attempts = self._typed_raw.get("attempts")
+            if attempts:
+                stopped_at = attempts[-1].get("stoppedAt")
+        return _from_epoch_ms(stopped_at)
 
     @property
     def environment(self) -> dict[str, str]:

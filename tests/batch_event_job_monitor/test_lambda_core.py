@@ -426,6 +426,39 @@ class TestEventTime:
         assert timestamp == event_time
 
 
+class TestBatchJobTimestamps:
+    def test_records_when_the_batch_job_was_created_started_and_stopped(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> None:
+        monitor_job(
+            detail=make_detail(
+                status="SUCCEEDED",
+                createdAt=1718452800000,
+                startedAt=1718452860000,
+                stoppedAt=1718453400000,
+            ),
+            event_time=FIXED_NOW,
+            log_store=store,
+            job_group=JOB_GROUP,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+        )
+
+        key = store.canonical_key(CONTEXT)
+        record = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+        assert record["created_at"] == "2024-06-15T12:00:00+00:00"
+        assert record["started_at"] == "2024-06-15T12:01:00+00:00"
+        assert record["stopped_at"] == "2024-06-15T12:10:00+00:00"
+
+
 class TestParseEventTime:
     def test_parses_the_eventbridge_time_as_utc(self) -> None:
         parsed = parse_event_time("2024-06-15T12:00:00Z")

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -84,6 +85,48 @@ class TestProperties:
     def test_log_stream_name_missing_from_attempt_container_returns_none(self) -> None:
         job_details = JobDetails.from_event(make_detail(attempts=[{"container": {}}]))
         assert job_details.log_stream_name is None
+
+    def test_timestamps_convert_epoch_milliseconds_to_utc(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                createdAt=1718452800000,
+                startedAt=1718452860500,
+                stoppedAt=1718453400000,
+            )
+        )
+        assert job_details.created_at == datetime(
+            2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc
+        )
+        assert job_details.started_at == datetime(
+            2024, 6, 15, 12, 1, 0, 500000, tzinfo=timezone.utc
+        )
+        assert job_details.stopped_at == datetime(
+            2024, 6, 15, 12, 10, 0, tzinfo=timezone.utc
+        )
+
+    def test_started_and_stopped_at_fall_back_to_last_attempt(self) -> None:
+        detail = make_detail(
+            attempts=[
+                {"startedAt": 1718452800000, "stoppedAt": 1718452860000},
+                {"startedAt": 1718452900000, "stoppedAt": 1718453000000},
+            ]
+        )
+        del detail["startedAt"]
+        job_details = JobDetails.from_event(detail)
+        assert job_details.started_at == datetime(
+            2024, 6, 15, 12, 1, 40, tzinfo=timezone.utc
+        )
+        assert job_details.stopped_at == datetime(
+            2024, 6, 15, 12, 3, 20, tzinfo=timezone.utc
+        )
+
+    def test_timestamps_missing_return_none(self) -> None:
+        detail = make_detail()
+        del detail["startedAt"]
+        job_details = JobDetails.from_event(detail)
+        assert job_details.created_at is None
+        assert job_details.started_at is None
+        assert job_details.stopped_at is None
 
     def test_exit_code_missing_returns_none(self) -> None:
         job_details = JobDetails.from_event(make_detail())

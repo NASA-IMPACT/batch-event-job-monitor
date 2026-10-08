@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 
 import boto3
@@ -153,6 +154,9 @@ class S3RecordStore:
         event: ProcessingEventRecord,
         batch_job_id: str | None = None,
         log_stream_name: str | None = None,
+        created_at: datetime | None = None,
+        started_at: datetime | None = None,
+        stopped_at: datetime | None = None,
     ) -> None:
         """Append a state-transition event to the canonical record.
 
@@ -172,6 +176,10 @@ class S3RecordStore:
             CloudWatch log stream for the job's most recent Batch attempt.
             Recorded only when present, so an event raised before a container
             exists cannot erase a stream an earlier event already supplied.
+        created_at, started_at, stopped_at : datetime or None, optional
+            When the Batch job was submitted, started running, and stopped.
+            Each is recorded only when present, so a later event cannot
+            erase one an earlier event already supplied.
         """
         key = self.canonical_key(context)
         record: dict[str, Any]
@@ -191,12 +199,22 @@ class S3RecordStore:
                 "events": [],
                 "current_state": event.state,
                 "log_stream_name": None,
+                "created_at": None,
+                "started_at": None,
+                "stopped_at": None,
             }
 
         record["events"].append(event.to_dict())
         record["current_state"] = event.state
         if log_stream_name is not None:
             record["log_stream_name"] = log_stream_name
+        for name, value in (
+            ("created_at", created_at),
+            ("started_at", started_at),
+            ("stopped_at", stopped_at),
+        ):
+            if value is not None:
+                record[name] = value.isoformat()
 
         self.client.put_object(
             Bucket=self.bucket,

@@ -108,6 +108,28 @@ def test_row_tolerates_a_record_written_before_log_streams_were_recorded() -> No
     assert row["log_stream_name"] is None
 
 
+def test_row_carries_the_batch_job_timestamps() -> None:
+    body = _body()
+    body["created_at"] = "2026-09-22T10:00:00+00:00"
+    body["started_at"] = "2026-09-22T10:01:00+00:00"
+    body["stopped_at"] = "2026-09-22T10:05:00+00:00"
+    row = record_to_row(
+        source_key=SOURCE_KEY, body=body, partition_key_names=PARTITION_KEY_NAMES
+    )
+    assert row["created_at"] == "2026-09-22T10:00:00+00:00"
+    assert row["started_at"] == "2026-09-22T10:01:00+00:00"
+    assert row["stopped_at"] == "2026-09-22T10:05:00+00:00"
+
+
+def test_row_tolerates_a_record_without_batch_job_timestamps() -> None:
+    row = record_to_row(
+        source_key=SOURCE_KEY, body=_body(), partition_key_names=PARTITION_KEY_NAMES
+    )
+    assert row["created_at"] is None
+    assert row["started_at"] is None
+    assert row["stopped_at"] is None
+
+
 def test_row_tolerates_events_missing_optional_fields() -> None:
     body = _body()
     body["events"] = [{"state": "AWAITING", "timestamp": "2026-09-22T10:00:00+00:00"}]

@@ -73,6 +73,28 @@ def test_create_table_sql_backticks_the_table_and_leaves_columns_bare() -> None:
     assert "`events` array<struct<" in sql
 
 
+@pytest.mark.parametrize("name", ["created_at", "started_at", "stopped_at"])
+def test_batch_job_timestamps_are_timestamps_in_iceberg_and_strings_in_staging(
+    name: str,
+) -> None:
+    assert dict(records_columns(PARTITION_KEY_NAMES))[name] == "timestamp"
+    assert dict(staging_columns(PARTITION_KEY_NAMES))[name] == "string"
+
+
+@pytest.mark.parametrize("name", ["created_at", "started_at", "stopped_at"])
+def test_merge_parses_batch_job_timestamps(name: str) -> None:
+    sql = merge_sql(
+        database="test_db",
+        records_table="records",
+        staging_table="records-staging",
+        run_id="12345678-1234-1234-1234-123456789abc",
+        partition_key_names=PARTITION_KEY_NAMES,
+    )
+    parsed = f'CAST(from_iso8601_timestamp(s."{name}") AS timestamp(6))'
+    assert f'"{name}" = {parsed}' in sql
+    assert sql.count(parsed) == 2  # the UPDATE and the INSERT
+
+
 def test_log_stream_name_is_declared_on_both_tables() -> None:
     records = dict(records_columns(PARTITION_KEY_NAMES))
     staging = dict(staging_columns(PARTITION_KEY_NAMES))
