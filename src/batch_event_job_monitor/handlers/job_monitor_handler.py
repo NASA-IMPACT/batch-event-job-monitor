@@ -137,6 +137,7 @@ def make_handler(resolve_untracked: UntrackedJobResolver | None = None) -> Handl
             job_group=job_group,
             retry_policy=config.retry_policy,
             exit_code_outcomes=config.exit_code_outcomes,
+            presubmit_states=config.presubmit_processing_states(),
             retry_queue_url=(
                 os.environ.get("JOB_RETRY_QUEUE_URL") if config.route_failures else None
             ),

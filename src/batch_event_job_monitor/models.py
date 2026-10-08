@@ -15,6 +15,7 @@ class _Kind(enum.Enum):
     or picking a _Kind directly.
     """
 
+    PRESUBMIT = enum.auto()
     SUBMITTED = enum.auto()
     AWAITING = enum.auto()
     SUCCESS = enum.auto()
@@ -39,11 +40,31 @@ class ProcessingState:
     callback: a new terminal outcome is just a new entry in a job_type's
     exit-code table, not a new ProcessingState member to ship a code change
     for.
+
+    A presubmit state (see presubmit) names a wait a submitter tracks
+    before it submits a job, e.g. "AWAITING_ANCILLARY".
     """
 
     name: str
     kind: _Kind
     dlq: bool = True
+
+    @classmethod
+    def presubmit(cls, name: str) -> ProcessingState:
+        """A state a submitter tracks before submitting a job.
+
+        The submitter writes, lists, and deletes its pointers with
+        S3RecordStore's state-pointer methods. Declared on the job_type's
+        JobTypeConfig.presubmit_states, monitor_job deletes the pointer for
+        an entity's attempt on every event for that attempt, so one is
+        never left behind once the job is in Batch.
+
+        Parameters
+        ----------
+        name : str
+            The state's name, used in the state-pointer key.
+        """
+        return cls(name=name, kind=_Kind.PRESUBMIT)
 
     @property
     def retryable(self) -> bool:
@@ -53,6 +74,8 @@ class ProcessingState:
     @property
     def rank(self) -> int:
         """Lifecycle rank, for detecting out-of-order/stale transitions."""
+        if self.kind is _Kind.PRESUBMIT:
+            return -1
         if self.kind is _Kind.SUBMITTED:
             return 0
         if self.kind is _Kind.AWAITING:
@@ -74,7 +97,7 @@ class ProcessingState:
         bool
             True if the state is terminal, False otherwise.
         """
-        if self.kind in (_Kind.SUBMITTED, _Kind.AWAITING):
+        if self.kind in (_Kind.PRESUBMIT, _Kind.SUBMITTED, _Kind.AWAITING):
             return False
         if self.kind is _Kind.RETRYABLE_FAILURE:
             return attempt >= retry_policy.max_attempts
@@ -427,6 +450,11 @@ class JobTypeConfig:
         "FAILED") records one AWAITING event per job rather than up to four.
         Must include SUCCEEDED and FAILED, and only statuses in
         BATCH_EVENT_STATUSES -- JobMonitorFunction checks at synth time.
+    presubmit_states : tuple[str, ...], optional
+        Names of the states a submitter tracks for this job_type before
+        submitting a job (see ProcessingState.presubmit). monitor_job
+        deletes their pointers for an entity's attempt on every event for
+        that attempt. Defaults to none.
 
     JobMonitorFunction resolves one JobTypeConfig per job_type from a
     single deploy-time env var; there is no per-job or per-invocation
@@ -440,6 +468,11 @@ class JobTypeConfig:
     requires_bejm_parameters: bool = True
     route_failures: bool = True
     tracked_statuses: tuple[str, ...] = BATCH_EVENT_STATUSES
+    presubmit_states: tuple[str, ...] = ()
+
+    def presubmit_processing_states(self) -> tuple[ProcessingState, ...]:
+        """This job_type's presubmit_states as ProcessingStates."""
+        return tuple(ProcessingState.presubmit(name) for name in self.presubmit_states)
 
     def to_dict(self) -> dict[str, Any]:
         """Encode for embedding in JobMonitorFunction's deploy-time JSON."""
@@ -451,6 +484,7 @@ class JobTypeConfig:
             "requires_bejm_parameters": self.requires_bejm_parameters,
             "route_failures": self.route_failures,
             "tracked_statuses": list(self.tracked_statuses),
+            "presubmit_states": list(self.presubmit_states),
         }
 
     @classmethod
@@ -466,6 +500,7 @@ class JobTypeConfig:
             requires_bejm_parameters=data.get("requires_bejm_parameters", True),
             route_failures=data.get("route_failures", True),
             tracked_statuses=tuple(data.get("tracked_statuses", BATCH_EVENT_STATUSES)),
+            presubmit_states=tuple(data.get("presubmit_states", ())),
         )
 
 

@@ -12,6 +12,7 @@ from batch_event_job_monitor.models import (
     JobGroup,
     JobTypeConfig,
     ProcessingEventRecord,
+    ProcessingState,
     ProcessingStates,
     RetryMessage,
     RetryPolicy,
@@ -71,6 +72,10 @@ class TestRank:
             == ProcessingStates.FAILURE_NONRETRYABLE.rank
         )
 
+    def test_presubmit_state_ranks_below_submitted(self) -> None:
+        presubmit = ProcessingState.presubmit("AWAITING_ANCILLARY")
+        assert presubmit.rank < ProcessingStates.SUBMITTED.rank
+
     def test_custom_terminal_state_ranks_like_builtin_terminal(self) -> None:
         cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         assert cloudy.rank == ProcessingStates.FAILURE_NONRETRYABLE.rank
@@ -116,6 +121,10 @@ class TestRetryPolicy:
 
 class TestIsTerminal:
     """Tests for ProcessingState.is_terminal."""
+
+    def test_presubmit_state_is_never_terminal(self) -> None:
+        presubmit = ProcessingState.presubmit("AWAITING_ANCILLARY")
+        assert not presubmit.is_terminal(3, RetryPolicy(max_attempts=3))
 
     def test_success_is_always_terminal(self) -> None:
         """SUCCESS is always terminal regardless of attempt count."""
@@ -628,6 +637,7 @@ class TestJobTypeConfig:
         assert config.requires_bejm_parameters is True
         assert config.route_failures is True
         assert config.tracked_statuses == BATCH_EVENT_STATUSES
+        assert config.presubmit_states == ()
 
     def test_to_dict_from_dict_round_trips(self) -> None:
         config = JobTypeConfig(
@@ -640,8 +650,19 @@ class TestJobTypeConfig:
             requires_bejm_parameters=False,
             route_failures=False,
             tracked_statuses=("RUNNABLE", "SUCCEEDED", "FAILED"),
+            presubmit_states=("AWAITING_ANCILLARY",),
         )
         assert JobTypeConfig.from_dict(config.to_dict()) == config
+
+    def test_presubmit_processing_states(self) -> None:
+        config = JobTypeConfig(
+            job_queue_arn=_JOB_QUEUE_ARN,
+            job_definition_arn=_JOB_DEFINITION_ARN,
+            presubmit_states=("AWAITING_ANCILLARY",),
+        )
+        assert config.presubmit_processing_states() == (
+            ProcessingState.presubmit("AWAITING_ANCILLARY"),
+        )
 
     def test_from_dict_missing_optional_keys_uses_defaults(self) -> None:
         config = JobTypeConfig.from_dict(

@@ -57,6 +57,7 @@ def job_type_config(
     requires_bejm_parameters: bool = True,
     route_failures: bool = True,
     tracked_statuses: Sequence[str] = BATCH_EVENT_STATUSES,
+    presubmit_states: Sequence[str] = (),
 ) -> JobTypeConfig:
     """Build a JobTypeConfig from typed CDK Batch refs.
 
@@ -73,4 +74,5 @@ def job_type_config(
         requires_bejm_parameters=requires_bejm_parameters,
         route_failures=route_failures,
         tracked_statuses=tuple(tracked_statuses),
+        presubmit_states=tuple(presubmit_states),
     )

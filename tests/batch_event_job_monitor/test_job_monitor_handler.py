@@ -11,7 +11,7 @@ from mypy_boto3_sqs import SQSClient
 
 from batch_event_job_monitor.job_details import JobDetails
 from batch_event_job_monitor.log_store import S3RecordStore
-from batch_event_job_monitor.models import JobGroup, JobTypeConfig
+from batch_event_job_monitor.models import JobGroup, JobTypeConfig, ProcessingState
 
 
 def _event(**detail_overrides: Any) -> dict[str, Any]:
@@ -130,6 +130,44 @@ class TestTrackedJobs:
         key = S3RecordStore(bucket=bucket).canonical_key(context)
         record = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
         assert record["events"][0]["timestamp"] == "2020-01-02T03:04:05+00:00"
+
+    def test_deletes_the_job_types_presubmit_pointers(
+        self,
+        s3: S3Client,
+        bucket: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        job_group = JobGroup.new(
+            job_type="composite",
+            partition_fields={"year_month": "2024-06"},
+            input_entity_ids=["entity-1"],
+            output_entity_id="output-1",
+        )
+        config = JobTypeConfig(
+            job_queue_arn="arn:aws:batch:us-west-2:123456789012:job-queue/processing",
+            job_definition_arn=(
+                "arn:aws:batch:us-west-2:123456789012:job-definition/composite"
+            ),
+            presubmit_states=("AWAITING_ANCILLARY",),
+        )
+        monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
+        monkeypatch.setenv(
+            "PROCESSING_JOB_TYPE_CONFIGS",
+            json.dumps({"composite": config.to_dict()}),
+        )
+        store = S3RecordStore(bucket=bucket)
+        [context] = job_group.contexts()
+        awaiting_ancillary = ProcessingState.presubmit("AWAITING_ANCILLARY")
+        store.write_state_pointer_conditional(context=context, state=awaiting_ancillary)
+        event = {
+            **_event(status="RUNNABLE", parameters=job_group.to_batch_parameters()),
+            "time": "2020-01-02T03:04:05Z",
+        }
+
+        _handler(None).handler(cast(Any, event), cast(Any, None))
+
+        key = store.state_pointer_key(awaiting_ancillary, context)
+        assert s3.list_objects_v2(Bucket=bucket, Prefix=key).get("KeyCount", 0) == 0
 
 
 _SHADOW_CONFIG = JobTypeConfig(

@@ -970,3 +970,147 @@ class TestExitCodeOutcomeRouting:
         assert result.name == "TRANSIENT_TOOL_ERROR"
         assert result.retryable is True
         assert len(_receive_all(sqs, retry_queue_url)) == 1
+
+
+class TestPresubmitStates:
+    """monitor_job deletes a job_type's presubmit pointers -- written by the
+    submitter before it submitted the job -- on every event for the attempt."""
+
+    AWAITING_ANCILLARY = ProcessingState.presubmit("AWAITING_ANCILLARY")
+    TWIN_JOB_GROUP = TestMultiEntityGroup.TWIN_JOB_GROUP
+    CONTEXT_A = TestMultiEntityGroup.CONTEXT_A
+    CONTEXT_B = TestMultiEntityGroup.CONTEXT_B
+
+    @pytest.fixture
+    def kwargs(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue_url: str,
+        dlq_url: str,
+    ) -> dict[str, Any]:
+        return dict(
+            log_store=store,
+            retry_policy=RetryPolicy(max_attempts=3),
+            retry_queue_url=retry_queue_url,
+            dlq_url=dlq_url,
+            sqs_client=sqs,
+            event_time=FIXED_NOW,
+        )
+
+    def _exists(
+        self, s3: S3Client, bucket: str, store: S3RecordStore, context: JobContext
+    ) -> bool:
+        key = store.state_pointer_key(self.AWAITING_ANCILLARY, context)
+        return s3.list_objects_v2(Bucket=bucket, Prefix=key).get("KeyCount", 0) == 1
+
+    def test_first_event_deletes_every_entity_pointer(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        for context in (self.CONTEXT_A, self.CONTEXT_B):
+            store.write_state_pointer_conditional(
+                context=context, state=self.AWAITING_ANCILLARY
+            )
+
+        monitor_job(
+            detail=make_detail(status="RUNNABLE"),
+            job_group=self.TWIN_JOB_GROUP,
+            presubmit_states=[self.AWAITING_ANCILLARY],
+            **kwargs,
+        )
+
+        for context in (self.CONTEXT_A, self.CONTEXT_B):
+            assert not self._exists(s3, bucket, store, context)
+            assert (
+                store.find_state_pointer(context=context) is ProcessingStates.AWAITING
+            )
+
+    def test_stale_event_still_deletes_the_pointer(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        monitor_job(
+            detail=make_detail(status="SUCCEEDED"),
+            job_group=JOB_GROUP,
+            presubmit_states=[self.AWAITING_ANCILLARY],
+            **kwargs,
+        )
+        store.write_state_pointer_conditional(
+            context=CONTEXT, state=self.AWAITING_ANCILLARY
+        )
+
+        monitor_job(
+            detail=make_detail(status="RUNNING"),
+            job_group=JOB_GROUP,
+            presubmit_states=[self.AWAITING_ANCILLARY],
+            **kwargs,
+        )
+
+        assert not self._exists(s3, bucket, store, CONTEXT)
+        assert store.find_state_pointer(context=CONTEXT) is ProcessingStates.SUCCESS
+
+    def test_other_attempts_pointers_are_kept(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        next_attempt = dataclasses.replace(CONTEXT, attempt=1)
+        store.write_state_pointer_conditional(
+            context=next_attempt, state=self.AWAITING_ANCILLARY
+        )
+
+        monitor_job(
+            detail=make_detail(status="RUNNABLE"),
+            job_group=JOB_GROUP,
+            presubmit_states=[self.AWAITING_ANCILLARY],
+            **kwargs,
+        )
+
+        assert self._exists(s3, bucket, store, next_attempt)
+
+    def test_undeclared_states_are_kept(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        store.write_state_pointer_conditional(
+            context=CONTEXT, state=self.AWAITING_ANCILLARY
+        )
+
+        monitor_job(
+            detail=make_detail(status="RUNNABLE"), job_group=JOB_GROUP, **kwargs
+        )
+
+        assert self._exists(s3, bucket, store, CONTEXT)
+
+    def test_accepts_a_one_shot_iterable(
+        self,
+        store: S3RecordStore,
+        s3: S3Client,
+        bucket: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        for context in (self.CONTEXT_A, self.CONTEXT_B):
+            store.write_state_pointer_conditional(
+                context=context, state=self.AWAITING_ANCILLARY
+            )
+
+        monitor_job(
+            detail=make_detail(status="RUNNABLE"),
+            job_group=self.TWIN_JOB_GROUP,
+            presubmit_states=iter([self.AWAITING_ANCILLARY]),
+            **kwargs,
+        )
+
+        assert not self._exists(s3, bucket, store, self.CONTEXT_B)
