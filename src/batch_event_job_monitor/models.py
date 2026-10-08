@@ -15,7 +15,7 @@ class _Kind(enum.Enum):
     or picking a _Kind directly.
     """
 
-    SUBMITTED = enum.auto()
+    SUBMITTER = enum.auto()
     AWAITING = enum.auto()
     SUCCESS = enum.auto()
     RETRYABLE_FAILURE = enum.auto()
@@ -26,7 +26,7 @@ class _Kind(enum.Enum):
 class ProcessingState:
     """A job's processing state.
 
-    Not a closed enum. SUBMITTED/AWAITING/SUCCESS/FAILURE_RETRYABLE/
+    Not a closed enum. AWAITING/SUCCESS/FAILURE_RETRYABLE/
     FAILURE_NONRETRYABLE are provided by ProcessingStates below as the
     built-in lifecycle, but a job_type's ExitCodeOutcomes can produce
     additional named terminal states (e.g. "CLOUDY") that behave like
@@ -39,11 +39,32 @@ class ProcessingState:
     callback: a new terminal outcome is just a new entry in a job_type's
     exit-code table, not a new ProcessingState member to ship a code change
     for.
+
+    A submitter state (see submitter) is owned by the job submitter, e.g.
+    "AWAITING_ANCILLARY" while it waits on a job's inputs, or "SUBMITTED"
+    just before it calls SubmitJob.
     """
 
     name: str
     kind: _Kind
     dlq: bool = True
+
+    @classmethod
+    def submitter(cls, name: str) -> ProcessingState:
+        """A state owned by the job submitter.
+
+        The submitter writes, lists, and deletes its pointers with
+        S3RecordStore's state-pointer methods. Declared on the job_type's
+        JobTypeConfig.submitter_states, monitor_job deletes the pointer for
+        an entity's attempt on every event for that attempt, so one is
+        never left behind once the job is in Batch.
+
+        Parameters
+        ----------
+        name : str
+            The state's name, used in the state-pointer key.
+        """
+        return cls(name=name, kind=_Kind.SUBMITTER)
 
     @property
     def retryable(self) -> bool:
@@ -53,7 +74,7 @@ class ProcessingState:
     @property
     def rank(self) -> int:
         """Lifecycle rank, for detecting out-of-order/stale transitions."""
-        if self.kind is _Kind.SUBMITTED:
+        if self.kind is _Kind.SUBMITTER:
             return 0
         if self.kind is _Kind.AWAITING:
             return 1
@@ -74,7 +95,7 @@ class ProcessingState:
         bool
             True if the state is terminal, False otherwise.
         """
-        if self.kind in (_Kind.SUBMITTED, _Kind.AWAITING):
+        if self.kind in (_Kind.SUBMITTER, _Kind.AWAITING):
             return False
         if self.kind is _Kind.RETRYABLE_FAILURE:
             return attempt >= retry_policy.max_attempts
@@ -89,7 +110,6 @@ class ProcessingStates:
     etc, including job_type-specific custom states that never appear here.
     """
 
-    SUBMITTED = ProcessingState(name="SUBMITTED", kind=_Kind.SUBMITTED)
     AWAITING = ProcessingState(name="AWAITING", kind=_Kind.AWAITING)
     SUCCESS = ProcessingState(name="SUCCESS", kind=_Kind.SUCCESS)
     FAILURE_RETRYABLE = ProcessingState(
@@ -105,7 +125,6 @@ class ProcessingStates:
 # ExitCodeOutcomes.states() instead for a job_type that declares custom
 # terminal outcomes, so pointers in those states are found too.
 BASELINE_PROCESSING_STATES: tuple[ProcessingState, ...] = (
-    ProcessingStates.SUBMITTED,
     ProcessingStates.AWAITING,
     ProcessingStates.SUCCESS,
     ProcessingStates.FAILURE_RETRYABLE,
@@ -427,6 +446,11 @@ class JobTypeConfig:
         "FAILED") records one AWAITING event per job rather than up to four.
         Must include SUCCEEDED and FAILED, and only statuses in
         BATCH_EVENT_STATUSES -- JobMonitorFunction checks at synth time.
+    submitter_states : tuple[str, ...], optional
+        Names of the states the job submitter owns for this job_type (see
+        ProcessingState.submitter). monitor_job deletes their pointers for
+        an entity's attempt on every event for that attempt. Defaults to
+        none.
 
     JobMonitorFunction resolves one JobTypeConfig per job_type from a
     single deploy-time env var; there is no per-job or per-invocation
@@ -440,6 +464,11 @@ class JobTypeConfig:
     requires_bejm_parameters: bool = True
     route_failures: bool = True
     tracked_statuses: tuple[str, ...] = BATCH_EVENT_STATUSES
+    submitter_states: tuple[str, ...] = ()
+
+    def submitter_processing_states(self) -> tuple[ProcessingState, ...]:
+        """This job_type's submitter_states as ProcessingStates."""
+        return tuple(ProcessingState.submitter(name) for name in self.submitter_states)
 
     def to_dict(self) -> dict[str, Any]:
         """Encode for embedding in JobMonitorFunction's deploy-time JSON."""
@@ -451,6 +480,7 @@ class JobTypeConfig:
             "requires_bejm_parameters": self.requires_bejm_parameters,
             "route_failures": self.route_failures,
             "tracked_statuses": list(self.tracked_statuses),
+            "submitter_states": list(self.submitter_states),
         }
 
     @classmethod
@@ -466,6 +496,7 @@ class JobTypeConfig:
             requires_bejm_parameters=data.get("requires_bejm_parameters", True),
             route_failures=data.get("route_failures", True),
             tracked_statuses=tuple(data.get("tracked_statuses", BATCH_EVENT_STATUSES)),
+            submitter_states=tuple(data.get("submitter_states", ())),
         )
 
 

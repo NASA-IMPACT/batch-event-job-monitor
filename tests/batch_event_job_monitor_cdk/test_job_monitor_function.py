@@ -297,6 +297,38 @@ class TestTrackedRule:
         assert construct.rules["monthly-composite"] is not None
 
 
+class TestSubmitterStates:
+    def _configs(
+        self, *names: str, outcomes: ExitCodeOutcomes | None = None
+    ) -> dict[str, JobTypeConfig]:
+        return {
+            "monthly-composite": JobTypeConfig(
+                job_queue_arn=_JOB_QUEUE_ARN,
+                job_definition_arn=_JOB_DEFINITION_ARN,
+                exit_code_outcomes=outcomes or ExitCodeOutcomes(),
+                submitter_states=names,
+            )
+        }
+
+    def test_accepts_distinct_names(self) -> None:
+        _make_stack(job_type_configs=self._configs("AWAITING_ANCILLARY"))
+
+    @pytest.mark.parametrize("name", ["", "AWAITING/ANCILLARY", "state=AWAITING"])
+    def test_rejects_names_that_are_not_one_key_segment(self, name: str) -> None:
+        with pytest.raises(ValueError, match=r"'monthly-composite'.*non-empty"):
+            _make_stack(job_type_configs=self._configs(name))
+
+    @pytest.mark.parametrize("name", ["AWAITING", "SUCCESS", "FAILURE_RETRYABLE"])
+    def test_rejects_built_in_state_names(self, name: str) -> None:
+        with pytest.raises(ValueError, match=f"'monthly-composite'.*{name}.*collide"):
+            _make_stack(job_type_configs=self._configs(name))
+
+    def test_rejects_the_job_types_own_outcome_names(self) -> None:
+        outcomes = ExitCodeOutcomes({4: ExitCodeOutcome(name="CLOUDY", dlq=False)})
+        with pytest.raises(ValueError, match=r"CLOUDY.*collide"):
+            _make_stack(job_type_configs=self._configs("CLOUDY", outcomes=outcomes))
+
+
 class TestUntrackedRule:
     def test_one_untracked_rule_per_job_queue(self) -> None:
         stack, construct = _make_stack()

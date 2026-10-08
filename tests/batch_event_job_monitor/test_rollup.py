@@ -56,7 +56,7 @@ def _body() -> dict[str, Any]:
         "current_state": "SUCCESS",
         "log_stream_name": "job/default/abc123",
         "events": [
-            {"state": "SUBMITTED", "timestamp": "2026-09-22T10:00:00+00:00"},
+            {"state": "AWAITING", "timestamp": "2026-09-22T10:00:00+00:00"},
             {
                 "state": "SUCCESS",
                 "timestamp": "2026-09-22T10:05:00+00:00",
@@ -110,12 +110,12 @@ def test_row_tolerates_a_record_written_before_log_streams_were_recorded() -> No
 
 def test_row_tolerates_events_missing_optional_fields() -> None:
     body = _body()
-    body["events"] = [{"state": "SUBMITTED", "timestamp": "2026-09-22T10:00:00+00:00"}]
+    body["events"] = [{"state": "AWAITING", "timestamp": "2026-09-22T10:00:00+00:00"}]
     row = record_to_row(
         source_key=SOURCE_KEY, body=body, partition_key_names=PARTITION_KEY_NAMES
     )
     assert row["events"][0] == {
-        "state": "SUBMITTED",
+        "state": "AWAITING",
         "timestamp": "2026-09-22T10:00:00+00:00",
     }
 

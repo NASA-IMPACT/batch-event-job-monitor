@@ -113,7 +113,7 @@ class TestAppendCanonicalEvent:
         context = make_context()
         transitions = [
             ("AWAITING", "2024-01-15T00:00:00Z"),
-            ("SUBMITTED", "2024-01-16T00:00:00Z"),
+            ("SUCCESS", "2024-01-16T00:00:00Z"),
         ]
         for state_name, timestamp in transitions:
             store.append_canonical_event(
@@ -124,14 +124,14 @@ class TestAppendCanonicalEvent:
         resp = s3.get_object(Bucket=store.bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert len(record["events"]) == 2
-        assert record["current_state"] == "SUBMITTED"
+        assert record["current_state"] == "SUCCESS"
 
     def test_stores_batch_job_id(self, store: S3RecordStore, s3: S3Client) -> None:
         context = make_context()
         store.append_canonical_event(
             context=context,
             event=ProcessingEventRecord(
-                state="SUBMITTED", timestamp="2024-01-15T00:00:00Z"
+                state="AWAITING", timestamp="2024-01-15T00:00:00Z"
             ),
             batch_job_id="batch-job-123",
         )
@@ -200,7 +200,7 @@ class TestAppendCanonicalEvent:
         store.append_canonical_event(
             context=context,
             event=ProcessingEventRecord(
-                state="SUBMITTED", timestamp="2024-01-15T00:00:00Z"
+                state="AWAITING", timestamp="2024-01-15T00:00:00Z"
             ),
         )
         key = store.canonical_key(context)
@@ -234,30 +234,30 @@ class TestStatePointer:
         )
         store.write_state_pointer(
             context=context,
-            new_state=ProcessingStates.SUBMITTED,
+            new_state=ProcessingStates.SUCCESS,
             old_state=ProcessingStates.AWAITING,
         )
         awaiting_key = store.state_pointer_key(ProcessingStates.AWAITING, context)
         resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=awaiting_key)
         assert resp.get("KeyCount", 0) == 0
 
-        submitted_key = store.state_pointer_key(ProcessingStates.SUBMITTED, context)
-        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=submitted_key)
+        success_key = store.state_pointer_key(ProcessingStates.SUCCESS, context)
+        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=success_key)
         assert resp.get("KeyCount", 0) == 1
 
     def test_conditional_write_first_succeeds(self, store: S3RecordStore) -> None:
         written = store.write_state_pointer_conditional(
-            context=make_context(), state=ProcessingStates.SUBMITTED
+            context=make_context(), state=ProcessingStates.AWAITING
         )
         assert written is True
 
     def test_conditional_write_second_returns_false(self, store: S3RecordStore) -> None:
         context = make_context()
         written_first = store.write_state_pointer_conditional(
-            context=context, state=ProcessingStates.SUBMITTED
+            context=context, state=ProcessingStates.AWAITING
         )
         written_again = store.write_state_pointer_conditional(
-            context=context, state=ProcessingStates.SUBMITTED
+            context=context, state=ProcessingStates.AWAITING
         )
         assert written_first is True
         assert written_again is False
@@ -333,7 +333,7 @@ class TestListByState:
     def test_ignores_other_states(self, store: S3RecordStore) -> None:
         store.write_state_pointer(
             context=make_context(),
-            new_state=ProcessingStates.SUBMITTED,
+            new_state=ProcessingStates.SUCCESS,
             old_state=None,
         )
         results = store.list_by_state(
@@ -364,9 +364,9 @@ class TestFindStatePointer:
     def test_returns_recorded_state(self, store: S3RecordStore) -> None:
         context = make_context()
         store.write_state_pointer(
-            context=context, new_state=ProcessingStates.SUBMITTED, old_state=None
+            context=context, new_state=ProcessingStates.AWAITING, old_state=None
         )
-        assert store.find_state_pointer(context=context) is ProcessingStates.SUBMITTED
+        assert store.find_state_pointer(context=context) is ProcessingStates.AWAITING
 
     def test_scoped_to_exact_attempt(self, store: S3RecordStore) -> None:
         store.write_state_pointer(
@@ -381,7 +381,7 @@ class TestFindStatePointer:
     ) -> None:
         context = make_context()
         store.write_state_pointer(
-            context=context, new_state=ProcessingStates.SUBMITTED, old_state=None
+            context=context, new_state=ProcessingStates.AWAITING, old_state=None
         )
         # Simulate a stale leftover pointer (e.g. a previously swallowed
         # delete_object failure) by writing a second state pointer directly
@@ -675,7 +675,7 @@ class TestWriteStatePointerCrossAttempt:
         new_context = make_context(attempt=2)
         store.write_state_pointer(
             context=new_context,
-            new_state=ProcessingStates.SUBMITTED,
+            new_state=ProcessingStates.AWAITING,
             old_state=ProcessingStates.FAILURE_RETRYABLE,
             old_attempt=1,
         )
@@ -686,7 +686,7 @@ class TestWriteStatePointerCrossAttempt:
             s3.list_objects_v2(Bucket=store.bucket, Prefix=old_key).get("KeyCount", 0)
             == 0
         )
-        new_key = store.state_pointer_key(ProcessingStates.SUBMITTED, new_context)
+        new_key = store.state_pointer_key(ProcessingStates.AWAITING, new_context)
         assert (
             s3.list_objects_v2(Bucket=store.bucket, Prefix=new_key).get("KeyCount", 0)
             == 1
@@ -718,7 +718,7 @@ class TestKeyPrefix:
         store.append_canonical_event(
             context=context,
             event=ProcessingEventRecord(
-                state="SUBMITTED", timestamp="2024-01-15T00:00:00Z"
+                state="AWAITING", timestamp="2024-01-15T00:00:00Z"
             ),
         )
         listed = s3.list_objects_v2(Bucket=bucket, Prefix="bejm/records/")

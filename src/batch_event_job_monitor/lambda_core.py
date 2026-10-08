@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -29,6 +30,7 @@ def monitor_job(
     dlq_url: str | None,
     sqs_client: Any,
     exit_code_outcomes: ExitCodeOutcomes | None = None,
+    submitter_states: Iterable[ProcessingState] = (),
 ) -> ProcessingState:
     """Classify and record a Batch job state change event, routing failures.
 
@@ -81,6 +83,11 @@ def monitor_job(
         Deploy-time, job_type-specific exit-code taxonomy (see
         JobTypeConfig) checked before the built-in spot-interruption
         classification fallback.
+    submitter_states : Iterable[ProcessingState], optional
+        The job_type's submitter states (see JobTypeConfig.submitter_states).
+        Each entity's pointers in these states for this attempt are deleted
+        on every event, stale ones included, since any event for an attempt
+        means it was submitted.
 
     Returns
     -------
@@ -89,6 +96,7 @@ def monitor_job(
     """
     outcomes = exit_code_outcomes or ExitCodeOutcomes()
     states = outcomes.states()
+    submitter_states = tuple(submitter_states)
 
     job = JobDetails.from_event(detail)
     new_state = job.classify(retry_policy, outcomes)
@@ -131,6 +139,8 @@ def monitor_job(
             batch_job_id=job.job_id,
             log_stream_name=job.log_stream_name,
         )
+        for submitter_state in submitter_states:
+            log_store.delete_state_pointer(context=context, state=submitter_state)
 
         # Monotonicity guard: EventBridge does not guarantee delivery
         # order, so a stale/out-of-order event is possible two ways -- a

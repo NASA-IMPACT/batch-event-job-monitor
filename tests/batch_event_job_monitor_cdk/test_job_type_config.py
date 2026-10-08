@@ -136,3 +136,16 @@ class TestJobTypeConfig:
             tracked_statuses=["RUNNABLE", "SUCCEEDED", "FAILED"],
         )
         assert config.tracked_statuses == ("RUNNABLE", "SUCCEEDED", "FAILED")
+
+    def test_passes_through_submitter_states_as_a_tuple(self) -> None:
+        stack = _stack()
+        job_queue = batch.JobQueue.from_job_queue_arn(stack, "JobQueue", _JOB_QUEUE_ARN)
+        job_definition = batch.EcsJobDefinition.from_job_definition_arn(
+            stack, "JobDefinition", _JOB_DEFINITION_ARN
+        )
+        config = job_type_config(
+            job_queue=job_queue,
+            job_definition=job_definition,
+            submitter_states=["AWAITING_ANCILLARY"],
+        )
+        assert config.submitter_states == ("AWAITING_ANCILLARY",)

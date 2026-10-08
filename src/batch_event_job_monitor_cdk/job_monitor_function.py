@@ -171,6 +171,7 @@ class JobMonitorFunction(Construct):
 
         for job_type, config in job_type_configs.items():
             _validate_tracked_statuses(job_type, config.tracked_statuses)
+            _validate_submitter_states(job_type, config)
         _validate_handler(job_type_configs, entry=entry, index=index)
 
         self.queues = queues or MonitoringQueues(self, "Queues")
@@ -310,6 +311,38 @@ def _validate_tracked_statuses(job_type: str, tracked_statuses: Sequence[str]) -
         raise ValueError(
             f"job_type {job_type!r}: tracked_statuses must include {missing}: "
             "without terminal statuses no job is ever recorded as finished"
+        )
+
+
+def _validate_submitter_states(job_type: str, config: JobTypeConfig) -> None:
+    """Reject submitter state names that are not one S3 key segment, or that
+    collide with a state the monitor records.
+
+    The monitor deletes submitter pointers on every event, so a name shared
+    with one of the job_type's own states would delete that state's pointer.
+
+    Raises
+    ------
+    ValueError
+        If a name is empty, contains "/" or "=", or matches one of the
+        job_type's own state names.
+    """
+    malformed = [
+        name
+        for name in config.submitter_states
+        if not name or "/" in name or "=" in name
+    ]
+    if malformed:
+        raise ValueError(
+            f"job_type {job_type!r}: submitter_states {malformed} must be "
+            'non-empty and contain no "/" or "="'
+        )
+    own = {state.name for state in config.exit_code_outcomes.states()}
+    colliding = [name for name in config.submitter_states if name in own]
+    if colliding:
+        raise ValueError(
+            f"job_type {job_type!r}: submitter_states {colliding} collide with "
+            "states the monitor records for this job_type"
         )
 
 

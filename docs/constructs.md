@@ -316,6 +316,13 @@ monitor.rules             # dict[job_type, events.Rule]
 monitor.untracked_rules   # dict[job_type, events.Rule], one per distinct job queue
 ```
 
+### Submitter states
+
+A job_type's `JobTypeConfig.submitter_states` names the states its job submitter owns (see
+[submitter states](../README.md#submitter-states)). The monitor deletes their pointers for an entity's attempt on every
+event for that attempt. Each name must be one S3 key segment (non-empty, no `/` or `=`) and must not match a state the
+monitor records for that job_type, or the deploy fails at synth time.
+
 ### Untracked jobs
 
 A job submitted without `JobGroup.to_batch_parameters()` runs perfectly and produces no canonical record, no state

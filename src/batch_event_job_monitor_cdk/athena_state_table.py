@@ -11,7 +11,7 @@ The inventory snapshot (daily Parquet) is cheap to query and supports
 reconciliation queries such as:
 
   - Count entities by state / partition
-  - Find entities stuck in SUBMITTED or AWAITING for a given partition
+  - Find entities stuck in AWAITING for a given partition
   - Diff today vs yesterday to measure throughput
 """
 
@@ -116,8 +116,8 @@ class AthenaStateTable(Construct):
                 name="state",
                 type="string",
                 comment=(
-                    "Processing state (SUBMITTED, AWAITING, SUCCESS, "
-                    "FAILURE_RETRYABLE, FAILURE_NONRETRYABLE)."
+                    "Processing state (AWAITING, SUCCESS, FAILURE_RETRYABLE, "
+                    "FAILURE_NONRETRYABLE, or a job_type's own state)."
                 ),
             ),
             *(
