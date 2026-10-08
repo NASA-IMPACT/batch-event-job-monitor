@@ -10,7 +10,7 @@ from mypy_boto3_s3 import S3Client
 from mypy_boto3_sqs import SQSClient
 from mypy_boto3_sqs.type_defs import MessageTypeDef
 
-from batch_event_job_monitor.lambda_core import monitor_job
+from batch_event_job_monitor.lambda_core import monitor_job, parse_event_time
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import (
     ExitCodeOutcome,
@@ -63,10 +63,6 @@ def store(bucket: str) -> S3RecordStore:
     return S3RecordStore(bucket=bucket)
 
 
-def _fixed_now() -> datetime:
-    return FIXED_NOW
-
-
 def _seed_awaiting(store: S3RecordStore, context: JobContext = CONTEXT) -> None:
     store.write_state_pointer(
         context=context, new_state=ProcessingStates.AWAITING, old_state=None
@@ -105,7 +101,7 @@ class TestSuccessPath:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result is ProcessingStates.SUCCESS
 
@@ -127,7 +123,7 @@ class TestSuccessPath:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert _output_index_exists(s3, bucket, store, ProcessingStates.SUCCESS)
 
@@ -147,7 +143,7 @@ class TestSuccessPath:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert _receive_all(sqs, retry_queue_url) == []
         assert _receive_all(sqs, dlq_url) == []
@@ -169,7 +165,7 @@ class TestSuccessPath:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
@@ -199,7 +195,7 @@ class TestSuccessPath:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         success_key = store.state_pointer_key(ProcessingStates.SUCCESS, CONTEXT)
         assert (
@@ -233,7 +229,7 @@ class TestFailureRetryableWithAttemptsRemaining:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result is ProcessingStates.FAILURE_RETRYABLE
 
@@ -269,7 +265,7 @@ class TestFailureRetryableWithAttemptsRemaining:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert not _output_index_exists(
             s3, bucket, store, ProcessingStates.FAILURE_RETRYABLE
@@ -293,7 +289,7 @@ class TestFailureRetryableWithAttemptsRemaining:
             retry_queue_url=None,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert _receive_all(sqs, retry_queue_url) == []
         assert _receive_all(sqs, dlq_url) == []
@@ -323,7 +319,7 @@ class TestFailureRetryableAttemptsExhausted:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result is ProcessingStates.FAILURE_RETRYABLE
         assert _output_index_exists(
@@ -361,7 +357,7 @@ class TestFailureNonretryable:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result is ProcessingStates.FAILURE_NONRETRYABLE
         assert _output_index_exists(
@@ -395,14 +391,14 @@ class TestFailureNonretryable:
             retry_queue_url=retry_queue_url,
             dlq_url=None,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert _receive_all(sqs, retry_queue_url) == []
         assert _receive_all(sqs, dlq_url) == []
 
 
-class TestDefaultNow:
-    def test_uses_current_time_when_now_not_provided(
+class TestEventTime:
+    def test_records_the_event_time_not_the_current_time(
         self,
         store: S3RecordStore,
         s3: S3Client,
@@ -411,9 +407,10 @@ class TestDefaultNow:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
-        before = datetime.now(timezone.utc)
+        event_time = datetime(2020, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
+            event_time=event_time,
             log_store=store,
             job_group=JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
@@ -421,13 +418,19 @@ class TestDefaultNow:
             dlq_url=dlq_url,
             sqs_client=sqs,
         )
-        after = datetime.now(timezone.utc)
 
         key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         timestamp = datetime.fromisoformat(record["events"][0]["timestamp"])
-        assert before <= timestamp <= after
+        assert timestamp == event_time
+
+
+class TestParseEventTime:
+    def test_parses_the_eventbridge_time_as_utc(self) -> None:
+        parsed = parse_event_time("2024-06-15T12:00:00Z")
+        assert parsed == FIXED_NOW
+        assert parsed.tzinfo is not None
 
 
 class TestFullLifecycle:
@@ -451,7 +454,7 @@ class TestFullLifecycle:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
 
         submitted = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
@@ -510,7 +513,7 @@ class TestFullLifecycle:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         for status in ["PENDING", "RUNNABLE", "STARTING", "RUNNING"]:
             result = monitor_job(detail=make_detail(status=status), **kwargs)
@@ -545,7 +548,7 @@ class TestFullLifecycle:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         old_key = store.state_pointer_key(
             ProcessingStates.FAILURE_RETRYABLE, old_context
@@ -562,7 +565,7 @@ class TestFullLifecycle:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result is ProcessingStates.SUBMITTED
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 0
@@ -591,7 +594,7 @@ class TestMonotonicityGuard:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
         result = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
@@ -624,7 +627,7 @@ class TestMonotonicityGuard:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         context_1 = dataclasses.replace(CONTEXT, attempt=1)
         context_2 = dataclasses.replace(CONTEXT, attempt=2)
@@ -708,7 +711,7 @@ class TestMultiEntityGroup:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
 
         for context in (self.CONTEXT_A, self.CONTEXT_B):
@@ -749,7 +752,7 @@ class TestMultiEntityGroup:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         key = store.output_index_key(ProcessingStates.SUCCESS, self.CONTEXT_A)
         assert s3.list_objects_v2(Bucket=bucket, Prefix=key).get("KeyCount", 0) == 1
@@ -773,7 +776,7 @@ class TestMultiEntityGroup:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         retry_messages = _receive_all(sqs, retry_queue_url)
         assert len(retry_messages) == 1
@@ -806,7 +809,7 @@ class TestMultiEntityGroup:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result is ProcessingStates.SUBMITTED
 
@@ -840,7 +843,7 @@ class TestExitCodeOutcomeRouting:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result.name == "CLOUDY"
         assert result.retryable is False
@@ -869,7 +872,7 @@ class TestExitCodeOutcomeRouting:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert len(_receive_all(sqs, dlq_url)) == 1
 
@@ -896,7 +899,7 @@ class TestExitCodeOutcomeRouting:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
@@ -926,7 +929,7 @@ class TestExitCodeOutcomeRouting:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
         cloudy_key = store.output_index_key(cloudy, CONTEXT)
@@ -962,7 +965,7 @@ class TestExitCodeOutcomeRouting:
             retry_queue_url=retry_queue_url,
             dlq_url=dlq_url,
             sqs_client=sqs,
-            now=_fixed_now,
+            event_time=FIXED_NOW,
         )
         assert result.name == "TRANSIENT_TOOL_ERROR"
         assert result.retryable is True

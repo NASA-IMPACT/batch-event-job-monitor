@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import boto3
 
 from batch_event_job_monitor.job_details import JobDetails
-from batch_event_job_monitor.lambda_core import monitor_job
+from batch_event_job_monitor.lambda_core import monitor_job, parse_event_time
 from batch_event_job_monitor.log_store import S3RecordStore
 from batch_event_job_monitor.models import JobTypeConfig
 from batch_event_job_monitor.untracked import (
@@ -68,6 +68,7 @@ def handler(event: EventBridgeEvent, context: Context) -> dict[str, str]:
 
     new_state = monitor_job(
         detail=detail,
+        event_time=parse_event_time(event["time"]),
         log_store=log_store,
         job_group=job_group,
         retry_policy=config.retry_policy,
