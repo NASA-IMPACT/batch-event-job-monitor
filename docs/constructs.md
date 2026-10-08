@@ -475,6 +475,22 @@ the log group the job definition writes to (`/aws/batch/job` unless overridden).
 null for two reasons worth distinguishing: the job never started a container (a capacity failure or a bad job
 definition), or the record predates this column. A job retried internally by Batch keeps only its last attempt's stream.
 
+**Job timings:** `created_at`, `started_at`, and `stopped_at` record when the Batch job was submitted, started running,
+and stopped, so queue latency and run time come straight from the table:
+
+```sql
+SELECT job_type,
+       avg(date_diff('second', created_at, started_at)) AS queued_seconds,
+       avg(date_diff('second', started_at, stopped_at)) AS running_seconds
+FROM {database}.{records_table}
+WHERE current_state = 'SUCCESS'
+GROUP BY job_type
+```
+
+`started_at` is null for a job that never started a container. A job retried internally by Batch keeps its last
+attempt's `started_at` and `stopped_at`, like `log_stream_name`. All three are null in records written before they were
+recorded.
+
 **Backfill:** To backfill changes, invoke the reconcile function via the AWS Lambda console or CLI (set payload to
 `{"mode": "reconcile", "depth": 0}`) and monitor the `ReconcileDrift` metric. When it reaches 0, all drift is
 reconciled. Reconcile against a cold table returns every key, so it is the backfill procedure.

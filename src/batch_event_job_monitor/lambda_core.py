@@ -138,6 +138,9 @@ def monitor_job(
             event=event,
             batch_job_id=job.job_id,
             log_stream_name=job.log_stream_name,
+            created_at=job.created_at,
+            started_at=job.started_at,
+            stopped_at=job.stopped_at,
         )
         for submitter_state in submitter_states:
             log_store.delete_state_pointer(context=context, state=submitter_state)

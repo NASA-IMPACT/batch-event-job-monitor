@@ -90,6 +90,9 @@ def record_to_row(
             "events": events,
             "last_event_timestamp": events[-1]["timestamp"],
             "log_stream_name": body.get("log_stream_name"),
+            "created_at": body.get("created_at"),
+            "started_at": body.get("started_at"),
+            "stopped_at": body.get("stopped_at"),
             "source_key": source_key,
         }
     )

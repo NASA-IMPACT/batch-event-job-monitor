@@ -1,6 +1,7 @@
 """Tests for S3RecordStore (three-object log schema)."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 from mypy_boto3_s3 import S3Client
@@ -192,6 +193,49 @@ class TestAppendCanonicalEvent:
         key = store.canonical_key(context)
         record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
         assert record["log_stream_name"] == "job/default/abc123"
+
+    def test_stores_batch_job_timestamps_as_iso_8601(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="SUCCESS", timestamp="2024-06-15T12:10:00+00:00"
+            ),
+            created_at=datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc),
+            started_at=datetime(2024, 6, 15, 12, 1, tzinfo=timezone.utc),
+            stopped_at=datetime(2024, 6, 15, 12, 10, tzinfo=timezone.utc),
+        )
+        key = store.canonical_key(context)
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["created_at"] == "2024-06-15T12:00:00+00:00"
+        assert record["started_at"] == "2024-06-15T12:01:00+00:00"
+        assert record["stopped_at"] == "2024-06-15T12:10:00+00:00"
+
+    def test_batch_job_timestamps_are_not_erased_by_a_later_event_without_them(
+        self, store: S3RecordStore, s3: S3Client
+    ) -> None:
+        context = make_context()
+        started_at = datetime(2024, 6, 15, 12, 1, tzinfo=timezone.utc)
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="AWAITING", timestamp="2024-06-15T12:01:00+00:00"
+            ),
+            started_at=started_at,
+        )
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(
+                state="AWAITING", timestamp="2024-06-15T12:02:00+00:00"
+            ),
+        )
+        key = store.canonical_key(context)
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["started_at"] == started_at.isoformat()
+        assert record["created_at"] is None
+        assert record["stopped_at"] is None
 
     def test_log_stream_name_absent_from_every_event_stays_none(
         self, store: S3RecordStore, s3: S3Client
