@@ -584,6 +584,84 @@ class TestNextGroupAttempt:
         assert result == 5
 
 
+class TestAttemptForBatchJob:
+    OTHER_ENTITY_ID = "12TVK_2024-06_twin"
+
+    def _record(
+        self, store: S3RecordStore, *, batch_job_id: str, attempt: int, **ctx: object
+    ) -> None:
+        context = make_context(attempt=attempt, **ctx)
+        store.append_canonical_event(
+            context=context,
+            event=ProcessingEventRecord(state="SUCCESS", timestamp="t"),
+            batch_job_id=batch_job_id,
+        )
+        store.write_state_pointer(
+            context=context, new_state=ProcessingStates.SUCCESS, old_state=None
+        )
+
+    def _attempt(
+        self,
+        store: S3RecordStore,
+        batch_job_id: str,
+        input_entity_ids: list[str] | None = None,
+    ) -> int:
+        return store.attempt_for_batch_job(
+            job_type=JOB_TYPE,
+            partition_fields=TILE_MONTH_PARTITION,
+            input_entity_ids=input_entity_ids or [INPUT_ENTITY_ID],
+            output_entity_id=OUTPUT_ENTITY_ID,
+            batch_job_id=batch_job_id,
+        )
+
+    def test_brand_new_entity_is_attempt_one(self, store: S3RecordStore) -> None:
+        assert self._attempt(store, "job-1") == 1
+
+    def test_same_batch_job_reuses_its_attempt(self, store: S3RecordStore) -> None:
+        self._record(store, batch_job_id="job-1", attempt=1)
+        assert self._attempt(store, "job-1") == 1
+
+    def test_new_batch_job_is_the_next_attempt(self, store: S3RecordStore) -> None:
+        self._record(store, batch_job_id="job-1", attempt=1)
+        assert self._attempt(store, "job-2") == 2
+
+    def test_new_batch_job_follows_the_furthest_along_entity(
+        self, store: S3RecordStore
+    ) -> None:
+        self._record(store, batch_job_id="job-1", attempt=1)
+        self._record(
+            store,
+            batch_job_id="job-3",
+            attempt=3,
+            input_entity_id=self.OTHER_ENTITY_ID,
+        )
+        attempt = self._attempt(
+            store, "job-4", input_entity_ids=[INPUT_ENTITY_ID, self.OTHER_ENTITY_ID]
+        )
+        assert attempt == 4
+
+    def test_any_entity_having_seen_the_job_reuses_its_attempt(
+        self, store: S3RecordStore
+    ) -> None:
+        """A partial prior write (only one entity's record landed) still
+        resolves the job to the attempt it was first recorded under."""
+        self._record(store, batch_job_id="job-2", attempt=2)
+        attempt = self._attempt(
+            store, "job-2", input_entity_ids=[self.OTHER_ENTITY_ID, INPUT_ENTITY_ID]
+        )
+        assert attempt == 2
+
+    def test_pointer_without_a_record_is_the_next_attempt(
+        self, store: S3RecordStore
+    ) -> None:
+        store.write_state_pointer(
+            context=make_context(attempt=1),
+            new_state=ProcessingStates.SUCCESS,
+            old_state=None,
+        )
+        assert self._attempt(store, "job-2") == 2
+
+
 class TestWriteStatePointerCrossAttempt:
     def test_old_attempt_deletes_prior_attempt_pointer(
         self, store: S3RecordStore, s3: S3Client

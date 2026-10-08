@@ -47,6 +47,8 @@ def job_type_config(
     job_definition: batch.IJobDefinition,
     retry_policy: RetryPolicy | None = None,
     exit_code_outcomes: ExitCodeOutcomes | None = None,
+    requires_bejm_parameters: bool = True,
+    route_failures: bool = True,
 ) -> JobTypeConfig:
     """Build a JobTypeConfig from typed CDK Batch refs.
 
@@ -60,4 +62,6 @@ def job_type_config(
         job_definition_arn=job_definition_family_arn(job_definition),
         retry_policy=retry_policy or RetryPolicy(),
         exit_code_outcomes=exit_code_outcomes or ExitCodeOutcomes(),
+        requires_bejm_parameters=requires_bejm_parameters,
+        route_failures=route_failures,
     )

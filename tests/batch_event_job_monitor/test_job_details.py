@@ -246,6 +246,24 @@ class TestParameters:
         assert job_details.parameters == {}
 
 
+class TestEnvironment:
+    def test_environment_as_a_mapping(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                container={
+                    "environment": [
+                        {"name": "GRANULE", "value": "LC08_X"},
+                        {"name": "OUTPUT_BUCKET", "value": "out"},
+                    ]
+                }
+            )
+        )
+        assert job_details.environment == {"GRANULE": "LC08_X", "OUTPUT_BUCKET": "out"}
+
+    def test_environment_missing_returns_empty_dict(self) -> None:
+        assert JobDetails.from_event(make_detail()).environment == {}
+
+
 def make_bejm_parameters(**overrides: str) -> dict[str, str]:
     params = {
         "bejm_job_type": "monthly-composite",

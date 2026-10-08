@@ -559,3 +559,84 @@ class S3RecordStore:
             )
             for input_entity_id in input_entity_ids
         )
+
+    def attempt_for_batch_job(
+        self,
+        *,
+        job_type: str,
+        partition_fields: dict[str, str],
+        input_entity_ids: Iterable[str],
+        output_entity_id: str,
+        batch_job_id: str,
+        states: Iterable[ProcessingState] = BASELINE_PROCESSING_STATES,
+    ) -> int:
+        """Infer the attempt a Batch job is, for a job carrying no attempt.
+
+        For untracked-job resolvers (see job_monitor_handler.make_handler)
+        monitoring a system that resubmits each retry as a new Batch job
+        but does not record which attempt it is. Every event for one Batch
+        job resolves to the same attempt, so repeated statuses, duplicate
+        EventBridge deliveries, and out-of-order events all land on one
+        canonical record:
+
+        - an entity whose latest attempt's canonical record carries this
+          batch_job_id has already seen this job -- that attempt is reused;
+        - otherwise this job is the next attempt after the furthest-along
+          entity's (1 for brand-new entities), as in next_group_attempt.
+
+        Parameters
+        ----------
+        job_type : str
+            The job type.
+        partition_fields : dict[str, str]
+            Ordered partition key/value pairs.
+        input_entity_ids : Iterable[str]
+            The processed entity identifiers for this job group.
+        output_entity_id : str
+            The output entity identifier, needed to build each entity's
+            canonical record key.
+        batch_job_id : str
+            The AWS Batch job id the event is for.
+        states : Iterable[ProcessingState], optional
+            The bounded set of states to check -- see find_state_pointer.
+
+        Returns
+        -------
+        int
+            The attempt number this Batch job's events are recorded under.
+        """
+        states = tuple(states)
+        next_attempt = 1
+        for input_entity_id in input_entity_ids:
+            active = self.find_active_pointer(
+                job_type=job_type,
+                partition_fields=partition_fields,
+                input_entity_id=input_entity_id,
+                states=states,
+            )
+            if active is None:
+                continue
+            _, attempt = active
+            context = JobContext(
+                job_type=job_type,
+                partition_fields=partition_fields,
+                input_entity_id=input_entity_id,
+                output_entity_id=output_entity_id,
+                attempt=attempt,
+            )
+            if self._canonical_batch_job_id(context) == batch_job_id:
+                return attempt
+            next_attempt = max(next_attempt, attempt + 1)
+        return next_attempt
+
+    def _canonical_batch_job_id(self, context: JobContext) -> str | None:
+        try:
+            resp = self.client.get_object(
+                Bucket=self.bucket, Key=self.canonical_key(context)
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "NoSuchKey":
+                raise
+            return None
+        batch_job_id: str | None = json.loads(resp["Body"].read()).get("batch_job_id")
+        return batch_job_id

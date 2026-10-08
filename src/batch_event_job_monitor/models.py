@@ -392,6 +392,18 @@ class JobTypeConfig:
     exit_code_outcomes : ExitCodeOutcomes, optional
         This job_type's exit-code taxonomy. Always container-specific, so
         deploy-time like retry_policy. Defaults to no custom outcomes.
+    requires_bejm_parameters : bool, optional
+        Whether this job_type's jobs carry the bejm_* Batch parameters.
+        Defaults to True. Set False to monitor jobs submitted by a system
+        that cannot set them (e.g. one being shadowed during a migration):
+        JobMonitorFunction then matches every event for this job_type's
+        queue/job definition, and a custom handler's untracked-job resolver
+        (see job_monitor_handler.make_handler) infers each job's JobGroup.
+    route_failures : bool, optional
+        Whether failures are routed to the retry queue and dead-letter
+        queue. Defaults to True. Set False for jobs this system observes
+        but does not own, so their failures are recorded without being
+        resubmitted or dead-lettered.
 
     JobMonitorFunction resolves one JobTypeConfig per job_type from a
     single deploy-time env var; there is no per-job or per-invocation
@@ -402,6 +414,8 @@ class JobTypeConfig:
     job_definition_arn: str
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     exit_code_outcomes: ExitCodeOutcomes = field(default_factory=ExitCodeOutcomes)
+    requires_bejm_parameters: bool = True
+    route_failures: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Encode for embedding in JobMonitorFunction's deploy-time JSON."""
@@ -410,6 +424,8 @@ class JobTypeConfig:
             "job_definition_arn": self.job_definition_arn,
             "retry_policy": self.retry_policy.to_dict(),
             "exit_code_outcomes": self.exit_code_outcomes.to_dict(),
+            "requires_bejm_parameters": self.requires_bejm_parameters,
+            "route_failures": self.route_failures,
         }
 
     @classmethod
@@ -422,6 +438,8 @@ class JobTypeConfig:
             exit_code_outcomes=ExitCodeOutcomes.from_dict(
                 data.get("exit_code_outcomes", {})
             ),
+            requires_bejm_parameters=data.get("requires_bejm_parameters", True),
+            route_failures=data.get("route_failures", True),
         )
 
 

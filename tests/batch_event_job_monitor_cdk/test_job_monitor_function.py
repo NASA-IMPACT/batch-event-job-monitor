@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -441,3 +444,114 @@ class TestJobDefinitionOwnedByThisApp:
         assert isinstance(parts[-2], dict)
         assert "Fn::Select" in parts[-2]
         assert parts[-3].endswith(":job-definition/")
+
+
+_CUSTOM_ENTRY = tempfile.mkdtemp()
+Path(_CUSTOM_ENTRY, "handler.py").write_text("def handler(event, context):\n    pass\n")
+
+_LEGACY_JOB_QUEUE_ARN = "arn:aws:batch:us-west-2:123456789012:job-queue/legacy"
+_LEGACY_JOB_DEFINITION_ARN = "arn:aws:batch:us-west-2:123456789012:job-definition/old"
+
+_WITH_LEGACY_CONFIGS = {
+    "monthly-composite": JobTypeConfig(
+        job_queue_arn=_JOB_QUEUE_ARN, job_definition_arn=_JOB_DEFINITION_ARN
+    ),
+    "legacy": JobTypeConfig(
+        job_queue_arn=_LEGACY_JOB_QUEUE_ARN,
+        job_definition_arn=_LEGACY_JOB_DEFINITION_ARN,
+        requires_bejm_parameters=False,
+        route_failures=False,
+    ),
+}
+
+
+def _make_custom_handler_stack(
+    job_type_configs: dict[str, JobTypeConfig] | None = None, **kwargs: Any
+) -> tuple[Stack, JobMonitorFunction]:
+    """PythonFunction's Docker bundling is skipped via aws:cdk:bundling-stacks,
+    as these test the construct's wiring, not a consumer's bundled code."""
+    app = App(context={"aws:cdk:bundling-stacks": []})
+    stack = Stack(app, "TestStack")
+    construct = JobMonitorFunction(
+        stack,
+        "TestJobMonitorFunction",
+        processing_bucket=s3.Bucket(stack, "Bucket"),
+        job_type_configs=job_type_configs or _WITH_LEGACY_CONFIGS,
+        entry=_CUSTOM_ENTRY,
+        index="handler.py",
+        **kwargs,
+    )
+    return stack, construct
+
+
+class TestCustomHandler:
+    def test_entry_without_index_raises(self) -> None:
+        with pytest.raises(ValueError, match="entry and index must be given together"):
+            _make_stack(entry=_CUSTOM_ENTRY)
+
+    def test_index_without_entry_raises(self) -> None:
+        with pytest.raises(ValueError, match="entry and index must be given together"):
+            _make_stack(index="handler.py")
+
+    def test_uses_the_consumer_handler(self) -> None:
+        stack, _ = _make_custom_handler_stack()
+        Template.from_stack(stack).has_resource_properties(
+            "AWS::Lambda::Function", {"Handler": "handler.handler"}
+        )
+
+    def test_passes_through_extra_environment(self) -> None:
+        stack, _ = _make_custom_handler_stack(environment={"EXTRA": "value"})
+        Template.from_stack(stack).has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Environment": {
+                    "Variables": Match.object_like(
+                        {
+                            "EXTRA": "value",
+                            "PROCESSING_JOB_TYPE_CONFIGS": Match.any_value(),
+                        }
+                    )
+                }
+            },
+        )
+
+
+class TestJobTypesWithoutBejmParameters:
+    def test_require_a_custom_handler(self) -> None:
+        with pytest.raises(ValueError, match="needs a custom handler"):
+            _make_stack(job_type_configs=_WITH_LEGACY_CONFIGS)
+
+    def test_tracked_rule_does_not_require_the_parameters(self) -> None:
+        stack, _ = _make_custom_handler_stack()
+        [legacy] = [
+            rule
+            for rule in _tracked_rules(Template.from_stack(stack))
+            if rule["EventPattern"]["detail"]["jobQueue"] == [_LEGACY_JOB_QUEUE_ARN]
+        ]
+        assert "parameters" not in legacy["EventPattern"]["detail"]
+
+    def test_job_types_requiring_parameters_still_require_them(self) -> None:
+        stack, _ = _make_custom_handler_stack()
+        [composite] = [
+            rule
+            for rule in _tracked_rules(Template.from_stack(stack))
+            if rule["EventPattern"]["detail"]["jobQueue"] == [_JOB_QUEUE_ARN]
+        ]
+        assert composite["EventPattern"]["detail"]["parameters"] == {
+            "bejm_job_type": [{"exists": True}]
+        }
+
+    def test_no_untracked_rule_for_their_queue(self) -> None:
+        stack, _ = _make_custom_handler_stack()
+        [untracked] = _untracked_rules(Template.from_stack(stack))
+        assert untracked["EventPattern"]["detail"]["jobQueue"] == [_JOB_QUEUE_ARN]
+
+    def test_cannot_share_a_queue_with_job_types_requiring_them(self) -> None:
+        configs = {
+            **_WITH_LEGACY_CONFIGS,
+            "legacy": dataclasses.replace(
+                _WITH_LEGACY_CONFIGS["legacy"], job_queue_arn=_JOB_QUEUE_ARN
+            ),
+        }
+        with pytest.raises(ValueError, match="shared by job types"):
+            _make_custom_handler_stack(job_type_configs=configs)
