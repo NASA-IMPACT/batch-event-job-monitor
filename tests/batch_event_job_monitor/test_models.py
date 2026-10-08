@@ -24,7 +24,6 @@ class TestProcessingState:
 
     def test_processing_state_members(self) -> None:
         """Test that all built-in states exist."""
-        assert hasattr(ProcessingStates, "SUBMITTED")
         assert hasattr(ProcessingStates, "AWAITING")
         assert hasattr(ProcessingStates, "SUCCESS")
         assert hasattr(ProcessingStates, "FAILURE_RETRYABLE")
@@ -32,7 +31,6 @@ class TestProcessingState:
 
     def test_processing_state_names(self) -> None:
         """Test that built-in ProcessingState names are correct strings."""
-        assert ProcessingStates.SUBMITTED.name == "SUBMITTED"
         assert ProcessingStates.AWAITING.name == "AWAITING"
         assert ProcessingStates.SUCCESS.name == "SUCCESS"
         assert ProcessingStates.FAILURE_RETRYABLE.name == "FAILURE_RETRYABLE"
@@ -40,7 +38,6 @@ class TestProcessingState:
 
     def test_only_failure_retryable_is_retryable(self) -> None:
         assert ProcessingStates.FAILURE_RETRYABLE.retryable is True
-        assert ProcessingStates.SUBMITTED.retryable is False
         assert ProcessingStates.AWAITING.retryable is False
         assert ProcessingStates.SUCCESS.retryable is False
         assert ProcessingStates.FAILURE_NONRETRYABLE.retryable is False
@@ -54,9 +51,6 @@ class TestProcessingState:
 
 class TestRank:
     """Tests for ProcessingState.rank."""
-
-    def test_submitted_ranks_below_awaiting(self) -> None:
-        assert ProcessingStates.SUBMITTED.rank < ProcessingStates.AWAITING.rank
 
     def test_awaiting_ranks_below_terminal_states(self) -> None:
         assert ProcessingStates.AWAITING.rank < ProcessingStates.SUCCESS.rank
@@ -72,9 +66,9 @@ class TestRank:
             == ProcessingStates.FAILURE_NONRETRYABLE.rank
         )
 
-    def test_presubmit_state_ranks_below_submitted(self) -> None:
+    def test_presubmit_state_ranks_below_awaiting(self) -> None:
         presubmit = ProcessingState.presubmit("AWAITING_ANCILLARY")
-        assert presubmit.rank < ProcessingStates.SUBMITTED.rank
+        assert presubmit.rank < ProcessingStates.AWAITING.rank
 
     def test_custom_terminal_state_ranks_like_builtin_terminal(self) -> None:
         cloudy = ExitCodeOutcome(name="CLOUDY", dlq=False).to_processing_state()
@@ -155,12 +149,6 @@ class TestIsTerminal:
         """FAILURE_RETRYABLE is terminal when attempt > max_attempts."""
         policy = RetryPolicy(max_attempts=3)
         assert ProcessingStates.FAILURE_RETRYABLE.is_terminal(4, policy)
-
-    def test_submitted_not_terminal(self) -> None:
-        """SUBMITTED is never terminal."""
-        policy = RetryPolicy(max_attempts=3)
-        assert not ProcessingStates.SUBMITTED.is_terminal(1, policy)
-        assert not ProcessingStates.SUBMITTED.is_terminal(3, policy)
 
     def test_awaiting_not_terminal(self) -> None:
         """AWAITING is never terminal."""
@@ -568,7 +556,6 @@ class TestExitCodeOutcomes:
         )
         names = {state.name for state in outcomes.states()}
         assert names == {
-            "SUBMITTED",
             "AWAITING",
             "SUCCESS",
             "FAILURE_RETRYABLE",
@@ -590,7 +577,6 @@ class TestExitCodeOutcomes:
     def test_states_empty_mapping_is_just_baseline(self) -> None:
         names = {state.name for state in ExitCodeOutcomes().states()}
         assert names == {
-            "SUBMITTED",
             "AWAITING",
             "SUCCESS",
             "FAILURE_RETRYABLE",

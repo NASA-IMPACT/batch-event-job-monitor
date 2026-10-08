@@ -169,9 +169,11 @@ class TestClassify:
         policy = RetryPolicy(spot_interruption_status_reason_prefixes=("Custom",))
         assert job_details.classify(policy) == ProcessingStates.FAILURE_RETRYABLE
 
-    def test_submitted_returns_submitted(self) -> None:
+    def test_submitted_is_unrecognized(self) -> None:
+        """Batch sends no event for SUBMITTED, so none is ever classified."""
         job_details = JobDetails.from_event(make_detail(status="SUBMITTED"))
-        assert job_details.classify(RetryPolicy()) == ProcessingStates.SUBMITTED
+        with pytest.raises(ValueError, match="SUBMITTED"):
+            job_details.classify(RetryPolicy())
 
     @pytest.mark.parametrize("status", ["PENDING", "RUNNABLE", "STARTING", "RUNNING"])
     def test_in_flight_status_returns_awaiting(self, status: str) -> None:

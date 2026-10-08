@@ -16,7 +16,6 @@ class _Kind(enum.Enum):
     """
 
     PRESUBMIT = enum.auto()
-    SUBMITTED = enum.auto()
     AWAITING = enum.auto()
     SUCCESS = enum.auto()
     RETRYABLE_FAILURE = enum.auto()
@@ -27,7 +26,7 @@ class _Kind(enum.Enum):
 class ProcessingState:
     """A job's processing state.
 
-    Not a closed enum. SUBMITTED/AWAITING/SUCCESS/FAILURE_RETRYABLE/
+    Not a closed enum. AWAITING/SUCCESS/FAILURE_RETRYABLE/
     FAILURE_NONRETRYABLE are provided by ProcessingStates below as the
     built-in lifecycle, but a job_type's ExitCodeOutcomes can produce
     additional named terminal states (e.g. "CLOUDY") that behave like
@@ -75,8 +74,6 @@ class ProcessingState:
     def rank(self) -> int:
         """Lifecycle rank, for detecting out-of-order/stale transitions."""
         if self.kind is _Kind.PRESUBMIT:
-            return -1
-        if self.kind is _Kind.SUBMITTED:
             return 0
         if self.kind is _Kind.AWAITING:
             return 1
@@ -97,7 +94,7 @@ class ProcessingState:
         bool
             True if the state is terminal, False otherwise.
         """
-        if self.kind in (_Kind.PRESUBMIT, _Kind.SUBMITTED, _Kind.AWAITING):
+        if self.kind in (_Kind.PRESUBMIT, _Kind.AWAITING):
             return False
         if self.kind is _Kind.RETRYABLE_FAILURE:
             return attempt >= retry_policy.max_attempts
@@ -112,7 +109,6 @@ class ProcessingStates:
     etc, including job_type-specific custom states that never appear here.
     """
 
-    SUBMITTED = ProcessingState(name="SUBMITTED", kind=_Kind.SUBMITTED)
     AWAITING = ProcessingState(name="AWAITING", kind=_Kind.AWAITING)
     SUCCESS = ProcessingState(name="SUCCESS", kind=_Kind.SUCCESS)
     FAILURE_RETRYABLE = ProcessingState(
@@ -128,7 +124,6 @@ class ProcessingStates:
 # ExitCodeOutcomes.states() instead for a job_type that declares custom
 # terminal outcomes, so pointers in those states are found too.
 BASELINE_PROCESSING_STATES: tuple[ProcessingState, ...] = (
-    ProcessingStates.SUBMITTED,
     ProcessingStates.AWAITING,
     ProcessingStates.SUCCESS,
     ProcessingStates.FAILURE_RETRYABLE,

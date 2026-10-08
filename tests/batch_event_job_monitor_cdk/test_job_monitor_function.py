@@ -318,7 +318,7 @@ class TestPresubmitStates:
         with pytest.raises(ValueError, match=r"'monthly-composite'.*non-empty"):
             _make_stack(job_type_configs=self._configs(name))
 
-    @pytest.mark.parametrize("name", ["SUBMITTED", "AWAITING", "SUCCESS"])
+    @pytest.mark.parametrize("name", ["AWAITING", "SUCCESS", "FAILURE_RETRYABLE"])
     def test_rejects_built_in_state_names(self, name: str) -> None:
         with pytest.raises(ValueError, match=f"'monthly-composite'.*{name}.*collide"):
             _make_stack(job_type_configs=self._configs(name))

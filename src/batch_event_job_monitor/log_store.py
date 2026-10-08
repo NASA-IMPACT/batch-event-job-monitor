@@ -435,9 +435,8 @@ class S3RecordStore:
 
         Bounded scan: one list_objects_v2 call per candidate state,
         prefixed to this input_entity_id (ignoring the attempt suffix).
-        Used only when a SUBMITTED event's exact (entity, attempt) has no
-        pointer yet, to find whichever prior attempt's pointer needs
-        retiring.
+        Used only when an event's exact (entity, attempt) has no pointer
+        yet, to find whichever prior attempt's pointer needs retiring.
 
         Parameters
         ----------

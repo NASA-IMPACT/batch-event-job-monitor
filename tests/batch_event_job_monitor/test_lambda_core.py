@@ -437,7 +437,7 @@ class TestFullLifecycle:
     """monitor_job now derives old_state itself, so it must handle every
     Batch status, not just terminal SUCCEEDED/FAILED."""
 
-    def test_submitted_then_awaiting_then_success(
+    def test_awaiting_then_success(
         self,
         store: S3RecordStore,
         s3: S3Client,
@@ -457,25 +457,8 @@ class TestFullLifecycle:
             event_time=FIXED_NOW,
         )
 
-        submitted = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
-        assert submitted is ProcessingStates.SUBMITTED
-        assert (
-            s3.list_objects_v2(
-                Bucket=bucket,
-                Prefix=store.state_pointer_key(ProcessingStates.SUBMITTED, CONTEXT),
-            ).get("KeyCount", 0)
-            == 1
-        )
-
         runnable = monitor_job(detail=make_detail(status="RUNNABLE"), **kwargs)
         assert runnable is ProcessingStates.AWAITING
-        assert (
-            s3.list_objects_v2(
-                Bucket=bucket,
-                Prefix=store.state_pointer_key(ProcessingStates.SUBMITTED, CONTEXT),
-            ).get("KeyCount", 0)
-            == 0
-        )
         assert (
             s3.list_objects_v2(
                 Bucket=bucket,
@@ -491,11 +474,7 @@ class TestFullLifecycle:
         key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
-        assert [e["state"] for e in record["events"]] == [
-            "SUBMITTED",
-            "AWAITING",
-            "SUCCESS",
-        ]
+        assert [e["state"] for e in record["events"]] == ["AWAITING", "SUCCESS"]
 
     def test_awaiting_progression_does_not_rewrite_pointer(
         self,
@@ -531,7 +510,7 @@ class TestFullLifecycle:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
-        """A new attempt's first SUBMITTED event must retire the prior
+        """A new attempt's first event must retire the prior
         (exhausted) attempt's FAILURE_RETRYABLE pointer -- a cross-attempt
         transition, since state pointers are keyed per attempt."""
         old_context = dataclasses.replace(CONTEXT, attempt=3)
@@ -558,7 +537,7 @@ class TestFullLifecycle:
         new_context = dataclasses.replace(CONTEXT, attempt=4)
         new_job_group = dataclasses.replace(JOB_GROUP, attempt=4)
         result = monitor_job(
-            detail=make_detail(status="SUBMITTED"),
+            detail=make_detail(status="RUNNABLE"),
             log_store=store,
             job_group=new_job_group,
             retry_policy=retry_policy,
@@ -567,9 +546,9 @@ class TestFullLifecycle:
             sqs_client=sqs,
             event_time=FIXED_NOW,
         )
-        assert result is ProcessingStates.SUBMITTED
+        assert result is ProcessingStates.AWAITING
         assert s3.list_objects_v2(Bucket=bucket, Prefix=old_key).get("KeyCount", 0) == 0
-        new_key = store.state_pointer_key(ProcessingStates.SUBMITTED, new_context)
+        new_key = store.state_pointer_key(ProcessingStates.AWAITING, new_context)
         assert s3.list_objects_v2(Bucket=bucket, Prefix=new_key).get("KeyCount", 0) == 1
 
 
@@ -584,7 +563,7 @@ class TestMonotonicityGuard:
         dlq_url: str,
     ) -> None:
         """EventBridge does not guarantee delivery order: a same-attempt
-        event ranked below the recorded state (e.g. a straggling SUBMITTED
+        event ranked below the recorded state (e.g. a straggling RUNNING
         arriving after SUCCEEDED already landed) must not clobber the
         pointer, though it is still appended to the canonical record."""
         kwargs: dict[str, Any] = dict(
@@ -597,15 +576,15 @@ class TestMonotonicityGuard:
             event_time=FIXED_NOW,
         )
         monitor_job(detail=make_detail(status="SUCCEEDED"), **kwargs)
-        result = monitor_job(detail=make_detail(status="SUBMITTED"), **kwargs)
-        assert result is ProcessingStates.SUBMITTED
+        result = monitor_job(detail=make_detail(status="RUNNING"), **kwargs)
+        assert result is ProcessingStates.AWAITING
 
         assert store.find_state_pointer(context=CONTEXT) is ProcessingStates.SUCCESS
 
         key = store.canonical_key(CONTEXT)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
-        assert [e["state"] for e in record["events"]] == ["SUCCESS", "SUBMITTED"]
+        assert [e["state"] for e in record["events"]] == ["SUCCESS", "AWAITING"]
 
     def test_straggler_for_superseded_attempt_does_not_resurrect_pointer(
         self,
@@ -638,11 +617,11 @@ class TestMonotonicityGuard:
             status="FAILED", statusReason="Host EC2 instance terminated"
         )
         monitor_job(
-            detail=make_detail(status="SUBMITTED"), job_group=job_group_1, **kwargs
+            detail=make_detail(status="RUNNABLE"), job_group=job_group_1, **kwargs
         )
         monitor_job(detail=spot_detail, job_group=job_group_1, **kwargs)
         monitor_job(
-            detail=make_detail(status="SUBMITTED"), job_group=job_group_2, **kwargs
+            detail=make_detail(status="RUNNABLE"), job_group=job_group_2, **kwargs
         )
         _receive_all(sqs, retry_queue_url)  # drain the attempt-1 retry message
 
@@ -650,14 +629,14 @@ class TestMonotonicityGuard:
         assert result is ProcessingStates.FAILURE_RETRYABLE
 
         assert store.find_state_pointer(context=context_1) is None
-        assert store.find_state_pointer(context=context_2) is ProcessingStates.SUBMITTED
+        assert store.find_state_pointer(context=context_2) is ProcessingStates.AWAITING
         assert _receive_all(sqs, retry_queue_url) == []
 
         key = store.canonical_key(context_1)
         resp = s3.get_object(Bucket=bucket, Key=key)
         record = json.loads(resp["Body"].read())
         assert [e["state"] for e in record["events"]] == [
-            "SUBMITTED",
+            "AWAITING",
             "FAILURE_RETRYABLE",
             "FAILURE_RETRYABLE",
         ]
@@ -792,7 +771,7 @@ class TestMultiEntityGroup:
         retry_queue_url: str,
         dlq_url: str,
     ) -> None:
-        """entity A already terminal (SUCCESS) makes its own SUBMITTED
+        """entity A already terminal (SUCCESS) makes its own AWAITING
         transition stale and skipped, but entity B is brand new -- the
         group-level routing decision still fires because B was fresh, and
         A's already-recorded pointer is left untouched."""
@@ -802,7 +781,7 @@ class TestMultiEntityGroup:
         # CONTEXT_B intentionally not seeded -- brand new entity.
 
         result = monitor_job(
-            detail=make_detail(status="SUBMITTED"),
+            detail=make_detail(status="RUNNABLE"),
             log_store=store,
             job_group=self.TWIN_JOB_GROUP,
             retry_policy=RetryPolicy(max_attempts=3),
@@ -811,13 +790,13 @@ class TestMultiEntityGroup:
             sqs_client=sqs,
             event_time=FIXED_NOW,
         )
-        assert result is ProcessingStates.SUBMITTED
+        assert result is ProcessingStates.AWAITING
 
         assert store.find_state_pointer(context=self.CONTEXT_A) is (
             ProcessingStates.SUCCESS
         )
         assert store.find_state_pointer(context=self.CONTEXT_B) is (
-            ProcessingStates.SUBMITTED
+            ProcessingStates.AWAITING
         )
 
 
