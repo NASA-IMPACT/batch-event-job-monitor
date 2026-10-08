@@ -146,11 +146,59 @@ emits an `UntrackedJobs` CloudWatch metric and a structured log line, and `queue
 event so the submission can be replayed once the caller is fixed. Alarm on the metric -- see
 [`docs/constructs.md`](docs/constructs.md#untracked-jobs).
 
+## Monitoring jobs that cannot carry the `bejm_*` parameters
+
+Some jobs are submitted by a system you cannot change -- e.g. one you are shadowing during a migration. Monitor them by
+setting `requires_bejm_parameters=False` on their job_type's `JobTypeConfig`, and supplying a resolver that infers each
+job's `JobGroup` from the job itself (its container environment, job name, timestamps):
+
+```python
+# my_project/job_monitor.py
+from batch_event_job_monitor import JobDetails, JobGroup, S3RecordStore
+from batch_event_job_monitor.handlers.job_monitor_handler import make_handler
+
+
+def resolve(job: JobDetails, log_store: S3RecordStore) -> JobGroup | None:
+    granule = job.environment.get("GRANULE")
+    if granule is None:
+        return None  # not recognized: recorded as untracked
+    ...
+    return JobGroup(job_type="legacy", ..., attempt=attempt)
+
+
+handler = make_handler(resolve_untracked=resolve)
+```
+
+```python
+JobMonitorFunction(
+    self,
+    "JobMonitor",
+    processing_bucket=bucket,
+    job_type_configs={
+        "legacy": job_type_config(
+            job_queue=legacy_queue,
+            job_definition=legacy_job_definition,
+            requires_bejm_parameters=False,
+            route_failures=False,  # observed, not owned: never resubmit or dead-letter
+        ),
+    },
+    entry="src/",
+    index="my_project/job_monitor.py",
+)
+```
+
+The resolver is only consulted for jobs without the parameters; a job carrying them is always decoded from them. For a
+submitter that resubmits each retry as a new Batch job without recording the attempt,
+`S3RecordStore.attempt_for_batch_job(...)` infers it: every event for one Batch job resolves to the same attempt, and a
+new Batch job for the same entities to the next one. See
+[`docs/constructs.md`](docs/constructs.md#jobs-without-the-bejm_-parameters) for the EventBridge rules this changes.
+
 ## Library-only path
 
 For consumers who need custom logic the bundled handler can't express, the underlying functions are all directly
 importable: `monitor_job`, `resubmit_job`, `submit_job`, `JobDetails`, `JobGroup`, `JobContext`, `S3RecordStore`. Write
-your own Lambda handler and wire it up yourself.
+your own Lambda handler and wire it up yourself. Pass `monitor_job` the event's time as `event_time`
+(`parse_event_time(event["time"])`).
 
 ## Resubmitting jobs: `JobResubmitFunction`
 

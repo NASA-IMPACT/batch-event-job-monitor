@@ -108,3 +108,18 @@ class TestJobTypeConfig:
             retry_policy=retry_policy,
         )
         assert config.retry_policy == retry_policy
+
+    def test_passes_through_contract_and_routing_flags(self) -> None:
+        stack = _stack()
+        job_queue = batch.JobQueue.from_job_queue_arn(stack, "JobQueue", _JOB_QUEUE_ARN)
+        job_definition = batch.EcsJobDefinition.from_job_definition_arn(
+            stack, "JobDefinition", _JOB_DEFINITION_ARN
+        )
+        config = job_type_config(
+            job_queue=job_queue,
+            job_definition=job_definition,
+            requires_bejm_parameters=False,
+            route_failures=False,
+        )
+        assert config.requires_bejm_parameters is False
+        assert config.route_failures is False

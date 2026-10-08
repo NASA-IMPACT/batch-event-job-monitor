@@ -8,6 +8,10 @@ Docker-based dependency-manifest bundling is needed. entry is the parent
 directory of the installed batch_event_job_monitor package, computed at
 synth time, with exclude patterns restricting the zipped asset to just that
 subpackage.
+
+A consumer-authored handler (entry/index, e.g. wrapping
+job_monitor_handler.make_handler with an untracked-job resolver) is built
+with PythonFunction instead, the same way JobResubmitFunction's override is.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as targets,
     aws_lambda as _lambda,
+    aws_lambda_python_alpha as lambda_python,
     aws_s3 as s3,
 )
 from constructs import Construct
@@ -57,6 +62,8 @@ _UNTRACKED_BATCH_STATUSES = ["SUCCEEDED", "FAILED"]
 # rules and the untracked catch-all, so exactly one path handles each job.
 _JOB_TYPE_PARAM_PRESENT = {f"{PARAM_PREFIX}job_type": [{"exists": True}]}
 _JOB_TYPE_PARAM_ABSENT = {f"{PARAM_PREFIX}job_type": [{"exists": False}]}
+
+_DEFAULT_HANDLER_PATH = "batch_event_job_monitor.handlers.job_monitor_handler.handler"
 
 
 class JobMonitorFunction(Construct):
@@ -114,6 +121,23 @@ class JobMonitorFunction(Construct):
     retry_attempts : int, optional
         EventBridge target retries before an event is sent to the
         EventBridge DLQ. Defaults to 3.
+    entry : str or None, optional
+        Path to a consumer-authored Lambda source directory, overriding
+        the bundled default handler -- typically a module wrapping
+        job_monitor_handler.make_handler(resolve_untracked=...). Required
+        when any job_type sets requires_bejm_parameters=False. Must be
+        given together with index.
+    index : str or None, optional
+        Filename (relative to entry) of the consumer's handler module.
+        Must be given together with entry.
+    handler : str, optional
+        Handler function name within the index module. Only used when
+        entry/index override the default. Defaults to "handler".
+    bundling : lambda_python.BundlingOptions or None, optional
+        Bundling options forwarded to PythonFunction when entry/index
+        override the default. Ignored otherwise.
+    environment : dict[str, str] or None, optional
+        Additional environment variables for a custom handler.
     tracked_statuses : Sequence[str], optional
         Batch statuses every tracked rule matches, and so the only statuses
         that reach a job's canonical record. Defaults to
@@ -136,8 +160,9 @@ class JobMonitorFunction(Construct):
         The EventBridge rule invoking the Lambda for each job_type's own
         Batch job queue/job definition, keyed by job_type.
     untracked_rules : dict[str, events.Rule]
-        The catch-all rule for each distinct monitored Batch job queue,
-        keyed by the first job_type using that queue.
+        The catch-all rule for each distinct Batch job queue whose job
+        types require the bejm_* parameters, keyed by the first job_type
+        using that queue.
     """
 
     def __init__(
@@ -155,37 +180,63 @@ class JobMonitorFunction(Construct):
         timeout: Duration = Duration.minutes(1),
         retry_attempts: int = 3,
         tracked_statuses: Sequence[str] = BATCH_EVENT_STATUSES,
+        entry: str | None = None,
+        index: str | None = None,
+        handler: str = "handler",
+        bundling: lambda_python.BundlingOptions | None = None,
+        environment: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         _validate_tracked_statuses(tracked_statuses)
+        _validate_handler(job_type_configs, entry=entry, index=index)
 
         self.queues = queues or MonitoringQueues(self, "Queues")
 
-        self.function = _lambda.Function(
-            self,
-            "Function",
-            runtime=_lambda.Runtime.PYTHON_3_12,
-            handler="batch_event_job_monitor.handlers.job_monitor_handler.handler",
-            code=_lambda.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
-            function_name=function_name,
-            memory_size=memory_size,
-            timeout=timeout,
-            environment={
-                "PROCESSING_BUCKET_NAME": processing_bucket.bucket_name,
-                **({"PROCESSING_KEY_PREFIX": key_prefix} if key_prefix else {}),
-                "PROCESSING_JOB_TYPE_CONFIGS": json.dumps(
-                    {
-                        job_type: config.to_dict()
-                        for job_type, config in job_type_configs.items()
-                    }
-                ),
-                "JOB_RETRY_QUEUE_URL": self.queues.retry_queue.queue_url,
-                "JOB_FAILURE_DLQ_URL": self.queues.failure_dlq.queue_url,
-                "MONITOR_METRIC_NAMESPACE": metric_namespace,
-            },
-        )
+        full_environment = {
+            "PROCESSING_BUCKET_NAME": processing_bucket.bucket_name,
+            **({"PROCESSING_KEY_PREFIX": key_prefix} if key_prefix else {}),
+            "PROCESSING_JOB_TYPE_CONFIGS": json.dumps(
+                {
+                    job_type: config.to_dict()
+                    for job_type, config in job_type_configs.items()
+                }
+            ),
+            "JOB_RETRY_QUEUE_URL": self.queues.retry_queue.queue_url,
+            "JOB_FAILURE_DLQ_URL": self.queues.failure_dlq.queue_url,
+            "MONITOR_METRIC_NAMESPACE": metric_namespace,
+            **(environment or {}),
+        }
+
+        self.function: _lambda.Function
+        if entry is None:
+            self.function = _lambda.Function(
+                self,
+                "Function",
+                runtime=_lambda.Runtime.PYTHON_3_12,
+                handler=_DEFAULT_HANDLER_PATH,
+                code=_lambda.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
+                function_name=function_name,
+                memory_size=memory_size,
+                timeout=timeout,
+                environment=full_environment,
+            )
+        else:
+            assert index is not None
+            self.function = lambda_python.PythonFunction(
+                self,
+                "Function",
+                entry=entry,
+                index=index,
+                handler=handler,
+                runtime=_lambda.Runtime.PYTHON_3_12,
+                function_name=function_name,
+                memory_size=memory_size,
+                timeout=timeout,
+                environment=full_environment,
+                bundling=bundling,
+            )
 
         processing_bucket.grant_read_write(self.function)
         self.queues.retry_queue.grant_send_messages(self.function)
@@ -200,7 +251,9 @@ class JobMonitorFunction(Construct):
         # One rule per job_type, scoped to that job_type's own queue/job
         # definition -- jobDefinition matches by prefix since the event's
         # own jobDefinition field is revision-suffixed even though
-        # JobTypeConfig.job_definition_arn is the family ARN.
+        # JobTypeConfig.job_definition_arn is the family ARN. A job_type
+        # whose jobs carry no bejm_* parameters matches every event for its
+        # queue/job definition instead, for the handler's resolver to infer.
         self.rules = {
             job_type: events.Rule(
                 self,
@@ -212,7 +265,11 @@ class JobMonitorFunction(Construct):
                         "status": list(tracked_statuses),
                         "jobQueue": [config.job_queue_arn],
                         "jobDefinition": [{"prefix": f"{config.job_definition_arn}:"}],
-                        "parameters": _JOB_TYPE_PARAM_PRESENT,
+                        **(
+                            {"parameters": _JOB_TYPE_PARAM_PRESENT}
+                            if config.requires_bejm_parameters
+                            else {}
+                        ),
                     },
                 ),
                 targets=[lambda_target],
@@ -243,7 +300,11 @@ class JobMonitorFunction(Construct):
                 ],
             )
             for job_type, job_queue_arn in _first_job_type_per_queue(
-                job_type_configs
+                {
+                    job_type: config
+                    for job_type, config in job_type_configs.items()
+                    if config.requires_bejm_parameters
+                }
             ).items()
         }
 
@@ -268,6 +329,60 @@ def _validate_tracked_statuses(tracked_statuses: Sequence[str]) -> None:
         raise ValueError(
             f"tracked_statuses must include {missing}: without terminal "
             "statuses no job is ever recorded as finished"
+        )
+
+
+def _validate_handler(
+    job_type_configs: dict[str, JobTypeConfig],
+    *,
+    entry: str | None,
+    index: str | None,
+) -> None:
+    """Reject handler and job_type combinations that cannot track every job.
+
+    Raises
+    ------
+    ValueError
+        If only one of entry/index is given; if a job_type sets
+        requires_bejm_parameters=False without a custom handler to resolve
+        its jobs (the bundled one records them all as untracked); or if a
+        Batch job queue is shared by job types that do and do not require
+        the bejm_* parameters, where the queue's untracked catch-all rule
+        would also match every job of the latter.
+    """
+    if (entry is None) != (index is None):
+        raise ValueError(
+            "entry and index must be given together (or not at all, to use "
+            "the bundled default handler)"
+        )
+
+    without_parameters = sorted(
+        job_type
+        for job_type, config in job_type_configs.items()
+        if not config.requires_bejm_parameters
+    )
+    if without_parameters and entry is None:
+        raise ValueError(
+            f"job types {without_parameters} set requires_bejm_parameters=False, "
+            "which needs a custom handler built with "
+            "job_monitor_handler.make_handler(resolve_untracked=...) -- pass "
+            "its entry/index"
+        )
+
+    requirement_by_queue: dict[str, set[bool]] = {}
+    for config in job_type_configs.values():
+        requirement_by_queue.setdefault(config.job_queue_arn, set()).add(
+            config.requires_bejm_parameters
+        )
+    mixed = sorted(
+        queue
+        for queue, requirement in requirement_by_queue.items()
+        if len(requirement) > 1
+    )
+    if mixed:
+        raise ValueError(
+            f"job queues {mixed} are shared by job types that do and do not "
+            "require the bejm_* parameters; give each kind its own queue"
         )
 
 

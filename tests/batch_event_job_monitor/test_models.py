@@ -624,6 +624,8 @@ class TestJobTypeConfig:
         )
         assert config.retry_policy == RetryPolicy()
         assert config.exit_code_outcomes == ExitCodeOutcomes()
+        assert config.requires_bejm_parameters is True
+        assert config.route_failures is True
 
     def test_to_dict_from_dict_round_trips(self) -> None:
         config = JobTypeConfig(
@@ -633,6 +635,8 @@ class TestJobTypeConfig:
             exit_code_outcomes=ExitCodeOutcomes(
                 {4: ExitCodeOutcome(name="CLOUDY", dlq=False)}
             ),
+            requires_bejm_parameters=False,
+            route_failures=False,
         )
         assert JobTypeConfig.from_dict(config.to_dict()) == config
 

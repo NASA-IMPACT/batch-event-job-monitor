@@ -341,6 +341,21 @@ cloudwatch.Metric(
 A job carrying `bejm_job_type` but missing the rest of the contract is tracked-but-malformed, not untracked: it reaches
 the handler, `decode_job_group` raises with the list of missing parameters, and the event ends up in `event_dlq`.
 
+### Jobs without the `bejm_*` parameters
+
+A job_type whose `JobTypeConfig` sets `requires_bejm_parameters=False` changes both kinds of rule:
+
+- its tracked rule drops the `bejm_job_type` existence test, matching every event for its queue and job definition;
+- its queue gets no catch-all rule, since there is no contract for its jobs to miss.
+
+Its events reach a consumer-authored handler built with `make_handler(resolve_untracked=...)`, given as `entry`/`index`
+-- the bundled handler cannot infer a `JobGroup`, so the construct raises without one. `entry` is bundled with
+`PythonFunction`, so it must declare `batch-event-job-monitor` as a dependency (e.g. in its `requirements.txt`). Pair it
+with `route_failures=False` for jobs another system owns, so failures are recorded but never retried or dead-lettered.
+
+A Batch job queue cannot be shared by job types that do and do not require the parameters: the queue's catch-all rule
+would also match every job of the latter. The construct raises at synth time.
+
 ## `JobResubmitFunction`
 
 Drains `retry_queue` and resubmits the next attempt. Bundles a generic default handler covering the common case (reuse

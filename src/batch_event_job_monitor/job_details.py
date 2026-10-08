@@ -100,6 +100,21 @@ class JobDetails:
         return None
 
     @property
+    def environment(self) -> dict[str, str]:
+        """Container environment variables, including submit-time overrides.
+
+        The usual way to identify a job submitted without the bejm_*
+        parameters, for an untracked-job resolver (see
+        job_monitor_handler.make_handler).
+        """
+        container = self._typed_raw.get("container") or {}
+        return {
+            entry["name"]: entry["value"]
+            for entry in container.get("environment", [])
+            if "name" in entry and "value" in entry
+        }
+
+    @property
     def status_reason(self) -> str | None:
         """Status reason, checking the top level then the last attempt."""
         status_reason = self._typed_raw.get("statusReason")
