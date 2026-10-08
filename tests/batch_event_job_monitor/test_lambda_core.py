@@ -951,11 +951,11 @@ class TestExitCodeOutcomeRouting:
         assert len(_receive_all(sqs, retry_queue_url)) == 1
 
 
-class TestPresubmitStates:
-    """monitor_job deletes a job_type's presubmit pointers -- written by the
+class TestSubmitterStates:
+    """monitor_job deletes a job_type's submitter pointers -- written by the
     submitter before it submitted the job -- on every event for the attempt."""
 
-    AWAITING_ANCILLARY = ProcessingState.presubmit("AWAITING_ANCILLARY")
+    AWAITING_ANCILLARY = ProcessingState.submitter("AWAITING_ANCILLARY")
     TWIN_JOB_GROUP = TestMultiEntityGroup.TWIN_JOB_GROUP
     CONTEXT_A = TestMultiEntityGroup.CONTEXT_A
     CONTEXT_B = TestMultiEntityGroup.CONTEXT_B
@@ -998,7 +998,7 @@ class TestPresubmitStates:
         monitor_job(
             detail=make_detail(status="RUNNABLE"),
             job_group=self.TWIN_JOB_GROUP,
-            presubmit_states=[self.AWAITING_ANCILLARY],
+            submitter_states=[self.AWAITING_ANCILLARY],
             **kwargs,
         )
 
@@ -1018,7 +1018,7 @@ class TestPresubmitStates:
         monitor_job(
             detail=make_detail(status="SUCCEEDED"),
             job_group=JOB_GROUP,
-            presubmit_states=[self.AWAITING_ANCILLARY],
+            submitter_states=[self.AWAITING_ANCILLARY],
             **kwargs,
         )
         store.write_state_pointer_conditional(
@@ -1028,7 +1028,7 @@ class TestPresubmitStates:
         monitor_job(
             detail=make_detail(status="RUNNING"),
             job_group=JOB_GROUP,
-            presubmit_states=[self.AWAITING_ANCILLARY],
+            submitter_states=[self.AWAITING_ANCILLARY],
             **kwargs,
         )
 
@@ -1050,7 +1050,7 @@ class TestPresubmitStates:
         monitor_job(
             detail=make_detail(status="RUNNABLE"),
             job_group=JOB_GROUP,
-            presubmit_states=[self.AWAITING_ANCILLARY],
+            submitter_states=[self.AWAITING_ANCILLARY],
             **kwargs,
         )
 
@@ -1088,7 +1088,7 @@ class TestPresubmitStates:
         monitor_job(
             detail=make_detail(status="RUNNABLE"),
             job_group=self.TWIN_JOB_GROUP,
-            presubmit_states=iter([self.AWAITING_ANCILLARY]),
+            submitter_states=iter([self.AWAITING_ANCILLARY]),
             **kwargs,
         )
 

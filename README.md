@@ -78,16 +78,15 @@ console/CLI)? Use `S3RecordStore.next_attempt(...)` (single entity) or `S3Record
 multi-entity group -- the max `next_attempt` across all its entities, so a prior partial write failure is still handled
 safely) to get the correct next `attempt` without hand-computing it.
 
-## Waiting before submission
+## Submitter states
 
-A job that cannot be submitted yet -- e.g. one waiting on ancillary data -- can be tracked in a presubmit state the
-submitter owns. Declare it on the job_type's `JobTypeConfig` and write its pointers with the usual `S3RecordStore`
-methods:
+A job submitter can track a job in states of its own -- e.g. `AWAITING_ANCILLARY` while the job waits on ancillary data.
+Declare them on the job_type's `JobTypeConfig` and write their pointers with the usual `S3RecordStore` methods:
 
 ```python
 from batch_event_job_monitor import ProcessingState, S3RecordStore
 
-AWAITING_ANCILLARY = ProcessingState.presubmit("AWAITING_ANCILLARY")
+AWAITING_ANCILLARY = ProcessingState.submitter("AWAITING_ANCILLARY")
 store = S3RecordStore(bucket="...", key_prefix="...")
 
 # When the inputs arrive
@@ -104,16 +103,16 @@ for pointer in store.list_by_state(
 ```
 
 ```python
-job_type_config(job_queue=job_queue, job_definition=job_definition, presubmit_states=["AWAITING_ANCILLARY"])
+job_type_config(job_queue=job_queue, job_definition=job_definition, submitter_states=["AWAITING_ANCILLARY"])
 ```
 
-The monitor deletes a declared presubmit pointer for an entity's attempt on every event for that attempt, so a submitter
+The monitor deletes a declared submitter pointer for an entity's attempt on every event for that attempt, so a submitter
 that stops between `submit_job` and its own delete leaves the pointer only until the job's first tracked event. A
 pointer listed again inside that window can be submitted twice. A submitter that must prevent that claims each entity
-first with a second presubmit state (e.g. `SUBMITTING`): `write_state_pointer_conditional` returns `False` if another
+first with a second submitter state (e.g. `SUBMITTED`): `write_state_pointer_conditional` returns `False` if another
 invocation already claimed it.
 
-Presubmit pointers live beside the monitor's own under `state/`, so the state table shows them with no extra setup. They
+Submitter pointers live beside the monitor's own under `state/`, so the state table shows them with no extra setup. They
 never count as an entity's current state for the monitor, and so never affect attempt numbering.
 
 ## Batteries included: `JobMonitorFunction`

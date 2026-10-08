@@ -297,7 +297,7 @@ class TestTrackedRule:
         assert construct.rules["monthly-composite"] is not None
 
 
-class TestPresubmitStates:
+class TestSubmitterStates:
     def _configs(
         self, *names: str, outcomes: ExitCodeOutcomes | None = None
     ) -> dict[str, JobTypeConfig]:
@@ -306,7 +306,7 @@ class TestPresubmitStates:
                 job_queue_arn=_JOB_QUEUE_ARN,
                 job_definition_arn=_JOB_DEFINITION_ARN,
                 exit_code_outcomes=outcomes or ExitCodeOutcomes(),
-                presubmit_states=names,
+                submitter_states=names,
             )
         }
 

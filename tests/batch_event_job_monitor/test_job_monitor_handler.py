@@ -131,7 +131,7 @@ class TestTrackedJobs:
         record = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
         assert record["events"][0]["timestamp"] == "2020-01-02T03:04:05+00:00"
 
-    def test_deletes_the_job_types_presubmit_pointers(
+    def test_deletes_the_job_types_submitter_pointers(
         self,
         s3: S3Client,
         bucket: str,
@@ -148,7 +148,7 @@ class TestTrackedJobs:
             job_definition_arn=(
                 "arn:aws:batch:us-west-2:123456789012:job-definition/composite"
             ),
-            presubmit_states=("AWAITING_ANCILLARY",),
+            submitter_states=("AWAITING_ANCILLARY",),
         )
         monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
         monkeypatch.setenv(
@@ -157,7 +157,7 @@ class TestTrackedJobs:
         )
         store = S3RecordStore(bucket=bucket)
         [context] = job_group.contexts()
-        awaiting_ancillary = ProcessingState.presubmit("AWAITING_ANCILLARY")
+        awaiting_ancillary = ProcessingState.submitter("AWAITING_ANCILLARY")
         store.write_state_pointer_conditional(context=context, state=awaiting_ancillary)
         event = {
             **_event(status="RUNNABLE", parameters=job_group.to_batch_parameters()),
