@@ -131,12 +131,15 @@ same `name_prefix` to each construct to get readable names instead. The default,
 | `MonitoringQueues`      | `{prefix}-retry-queue`, `-retry-dlq`, `-failure-dlq`, `-untracked-queue`, `-event-dlq` |
 | `JobMonitorFunction`    | `{prefix}-job-monitor`, plus the queue names above for queues it creates               |
 | `JobResubmitFunction`   | `{prefix}-job-resubmit`                                                                |
-| `RecordsRollupTable`    | `{prefix}-records-table-ddl`, `-records-table-ddl-provider`                            |
+| `RecordsRollupTable`    | `{prefix}-records-table-ddl`                                                           |
 | `RecordsRollupFunction` | `{prefix}-records-rollup`, `-records-reconcile`, `-rollup-queue`, `-rollup-dlq`        |
 
 The prefix must be unique per account and region, so include the stage (`my-app-dev`). Names are checked against the
-Lambda (64 character) and SQS (80 character) limits at synth time. The longest function suffix is 26 characters, which
-leaves 37 for the prefix.
+Lambda (64 character) and SQS (80 character) limits at synth time. The longest function suffix is 17 characters, which
+leaves 46 for the prefix.
+
+The DDL custom resource's provider function keeps its generated name, because its ARN is the resource's `ServiceToken`
+and CloudFormation rejects any update that changes one.
 
 Readable names come with costs:
 
