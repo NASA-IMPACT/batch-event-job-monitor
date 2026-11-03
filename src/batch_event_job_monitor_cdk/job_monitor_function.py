@@ -37,6 +37,14 @@ from batch_event_job_monitor.models import (
 )
 from batch_event_job_monitor_cdk.lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
 from batch_event_job_monitor_cdk.monitoring_queues import MonitoringQueues
+from batch_event_job_monitor_cdk.naming import (
+    function_name as prefixed_function_name,
+)
+
+_DESCRIPTION = (
+    "Records AWS Batch job state changes and routes failures to the retry "
+    "and failure queues"
+)
 
 # Terminal statuses every tracked rule must match: without them no job
 # reaches a terminal state, so nothing is retried or dead-lettered.
@@ -102,7 +110,14 @@ class JobMonitorFunction(Construct):
         CloudWatch namespace the handler publishes its embedded-metric
         counters to. Defaults to "BatchEventJobMonitor".
     function_name : str or None, optional
-        Explicit Lambda function name.
+        Explicit Lambda function name. Takes precedence over name_prefix.
+    name_prefix : str or None, optional
+        Prefix for readable names: the function becomes
+        ``{name_prefix}-job-monitor``, and queues created here (not ones
+        passed in) get MonitoringQueues' prefixed names. Defaults to None,
+        leaving the names to CloudFormation. Must be unique per account and
+        region. See "Naming resources" in docs/constructs.md before setting
+        or changing it on a deployed stack.
     memory_size : int, optional
         Lambda memory size in MB. Defaults to 256.
     timeout : Duration, optional
@@ -157,6 +172,7 @@ class JobMonitorFunction(Construct):
         queues: MonitoringQueues | None = None,
         metric_namespace: str = "BatchEventJobMonitor",
         function_name: str | None = None,
+        name_prefix: str | None = None,
         memory_size: int = 256,
         timeout: Duration = Duration.minutes(1),
         retry_attempts: int = 3,
@@ -174,7 +190,9 @@ class JobMonitorFunction(Construct):
             _validate_submitter_states(job_type, config)
         _validate_handler(job_type_configs, entry=entry, index=index)
 
-        self.queues = queues or MonitoringQueues(self, "Queues")
+        self.queues = queues or MonitoringQueues(
+            self, "Queues", name_prefix=name_prefix
+        )
 
         full_environment = {
             "PROCESSING_BUCKET_NAME": processing_bucket.bucket_name,
@@ -191,6 +209,9 @@ class JobMonitorFunction(Construct):
             **(environment or {}),
         }
 
+        resolved_name = function_name or prefixed_function_name(
+            name_prefix, "job-monitor"
+        )
         self.function: _lambda.Function
         if entry is None:
             self.function = _lambda.Function(
@@ -199,7 +220,8 @@ class JobMonitorFunction(Construct):
                 runtime=_lambda.Runtime.PYTHON_3_12,
                 handler=_DEFAULT_HANDLER_PATH,
                 code=_lambda.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
-                function_name=function_name,
+                function_name=resolved_name,
+                description=_DESCRIPTION,
                 memory_size=memory_size,
                 timeout=timeout,
                 environment=full_environment,
@@ -213,7 +235,8 @@ class JobMonitorFunction(Construct):
                 index=index,
                 handler=handler,
                 runtime=_lambda.Runtime.PYTHON_3_12,
-                function_name=function_name,
+                function_name=resolved_name,
+                description=_DESCRIPTION,
                 memory_size=memory_size,
                 timeout=timeout,
                 environment=full_environment,

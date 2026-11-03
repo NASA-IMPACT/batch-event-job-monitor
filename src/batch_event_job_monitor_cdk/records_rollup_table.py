@@ -34,6 +34,7 @@ from .athena_common import (
     create_inventory_table,
 )
 from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
+from .naming import function_name
 from .partition_key_spec import PartitionKeySpec
 
 ROLLUP_PREFIX = "records-rollup/"
@@ -104,6 +105,13 @@ class RecordsRollupTable(Construct):
         resource). The staging table and the inventory table are always
         DESTROY, matching the other inventory-backed tables in this package.
         Defaults to RemovalPolicy.RETAIN.
+    name_prefix : str or None, optional
+        Prefix for readable function names: ``{name_prefix}-records-table-ddl``
+        for the DDL handler and ``{name_prefix}-records-table-ddl-provider``
+        for its custom resource provider. Defaults to None, leaving the names
+        to CloudFormation. Must be unique per account and region. See "Naming
+        resources" in docs/constructs.md before setting or changing it on a
+        deployed stack.
     **kwargs : Any
         Additional keyword arguments forwarded to the Construct base class.
 
@@ -152,6 +160,7 @@ class RecordsRollupTable(Construct):
         staging_table_name: str = "records-staging",
         inventory_table_name: str = "records-inventory",
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
+        name_prefix: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -199,6 +208,7 @@ class RecordsRollupTable(Construct):
             partition_key_names=partition_key_names,
             workgroup_name=self.workgroup_name,
             removal_policy=removal_policy,
+            name_prefix=name_prefix,
         )
 
         self._create_table_optimizer(
@@ -300,10 +310,16 @@ class RecordsRollupTable(Construct):
         partition_key_names: list[str],
         workgroup_name: str,
         removal_policy: RemovalPolicy,
+        name_prefix: str | None,
     ) -> CustomResource:
         ddl_function = lambda_.Function(
             self,
             "DdlFunction",
+            function_name=function_name(name_prefix, "records-table-ddl"),
+            description=(
+                "Creates and updates the Iceberg records table by running DDL "
+                "through Athena, as a CloudFormation custom resource"
+            ),
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="batch_event_job_monitor.handlers.records_table_ddl_handler.handler",
             code=lambda_.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
@@ -345,7 +361,14 @@ class RecordsRollupTable(Construct):
             )
         )
 
-        provider = cr.Provider(self, "DdlProvider", on_event_handler=ddl_function)
+        provider = cr.Provider(
+            self,
+            "DdlProvider",
+            on_event_handler=ddl_function,
+            provider_function_name=function_name(
+                name_prefix, "records-table-ddl-provider"
+            ),
+        )
         resource = CustomResource(
             self,
             "Table",

@@ -3,6 +3,7 @@
 <!--toc:start-->
 
 - [Wiring it together](#wiring-it-together)
+- [Naming resources](#naming-resources)
 - [`ProcessingBucket`](#processingbucket)
   - [Naming: global vs account regional namespace](#naming-global-vs-account-regional-namespace)
 - [`MonitoringQueues`](#monitoringqueues)
@@ -119,6 +120,31 @@ RecordsRollupFunction(
     records_table=records_table,
 )
 ```
+
+## Naming resources
+
+CloudFormation's generated names are long and often cut off before the part that tells two resources apart. Pass the
+same `name_prefix` to each construct to get readable names instead. The default, `None`, keeps generated names.
+
+| Construct               | Names                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| `MonitoringQueues`      | `{prefix}-retry-queue`, `-retry-dlq`, `-failure-dlq`, `-untracked-queue`, `-event-dlq` |
+| `JobMonitorFunction`    | `{prefix}-job-monitor`, plus the queue names above for queues it creates               |
+| `JobResubmitFunction`   | `{prefix}-job-resubmit`                                                                |
+| `RecordsRollupTable`    | `{prefix}-records-table-ddl`, `-records-table-ddl-provider`                            |
+| `RecordsRollupFunction` | `{prefix}-records-rollup`, `-records-reconcile`, `-rollup-queue`, `-rollup-dlq`        |
+
+The prefix must be unique per account and region, so include the stage (`my-app-dev`). Names are checked against the
+Lambda (64 character) and SQS (80 character) limits at synth time. The longest function suffix is 26 characters, which
+leaves 37 for the prefix.
+
+Readable names come with costs:
+
+- **Fixed names can block replacement.** CloudFormation creates a replacement before deleting the original, and two
+  resources cannot share a name. An update that requires replacing a named resource fails until the name changes too.
+- **Setting or changing the prefix on a deployed stack replaces the resources.** Drain the queues first, because
+  messages in a replaced queue do not move to the new one: they are deleted with the old queue or left behind in it,
+  depending on its removal policy. Update anything that refers to the old names, such as alarms and dashboards.
 
 ## `ProcessingBucket`
 
