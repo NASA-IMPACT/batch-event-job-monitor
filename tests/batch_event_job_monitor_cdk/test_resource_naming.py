@@ -241,13 +241,15 @@ class TestJobResubmitFunction:
 
 
 class TestRecordsRollupTable:
-    def test_prefix_names_the_handler_and_its_provider(self) -> None:
+    def test_prefix_names_the_handler_but_not_its_provider(self) -> None:
+        """Renaming the provider changes the custom resource's ServiceToken.
+
+        CloudFormation rejects that update with "Modifying service token is
+        not allowed", so adopting a prefix on a deployed stack would fail.
+        """
         stack = _stack()
         _rollup_table(stack, name_prefix="hls-dev")
-        assert _function_names(stack) == {
-            "hls-dev-records-table-ddl",
-            "hls-dev-records-table-ddl-provider",
-        }
+        assert _function_names(stack) == {"hls-dev-records-table-ddl"}
 
     def test_default_leaves_names_to_cloudformation(self) -> None:
         stack = _stack()
