@@ -22,6 +22,7 @@ from aws_cdk import (
 from constructs import Construct
 
 from .lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
+from .naming import function_name as prefixed_function_name, queue_name
 from .partition_key_spec import PartitionKeySpec
 from .records_rollup_table import (
     ATHENA_RESULTS_ACTIONS,
@@ -146,6 +147,13 @@ class RecordsRollupFunction(Construct):
         Per-run cap on distinct keys. Defaults to 25000.
     max_chain_depth : int, optional
         Maximum self-invocation chain length. Defaults to 1000.
+    name_prefix : str or None, optional
+        Prefix for readable names: ``{name_prefix}-records-rollup``,
+        ``-records-reconcile``, ``-rollup-queue``, and ``-rollup-dlq``.
+        Defaults to None, leaving the names to CloudFormation. Must be unique
+        per account and region. See "Naming resources" in docs/constructs.md
+        before setting or changing it on a deployed stack: it replaces the
+        queues, and fixed names block later replacements.
     **kwargs : Any
         Additional keyword arguments forwarded to the Construct base class.
 
@@ -175,6 +183,7 @@ class RecordsRollupFunction(Construct):
         reconcile_schedule: events.Schedule | None = None,
         max_keys_per_run: int = 25000,
         max_chain_depth: int = 1000,
+        name_prefix: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -196,10 +205,16 @@ class RecordsRollupFunction(Construct):
             prefix=f"{key_prefix}{STAGING_PREFIX}", expiration=_STAGING_EXPIRATION
         )
 
-        self.dlq = sqs.Queue(self, "RollupDlq", retention_period=Duration.days(14))
+        self.dlq = sqs.Queue(
+            self,
+            "RollupDlq",
+            queue_name=queue_name(name_prefix, "rollup-dlq"),
+            retention_period=Duration.days(14),
+        )
         self.queue = sqs.Queue(
             self,
             "RollupQueue",
+            queue_name=queue_name(name_prefix, "rollup-queue"),
             # Matches the DLQ's retention: a multi-million-key backfill
             # drain can run longer than SQS's 4-day default, and a broken
             # chain would otherwise let queued keys silently expire.
@@ -238,9 +253,23 @@ class RecordsRollupFunction(Construct):
             "ROLLUP_MAX_DEPTH": str(max_chain_depth),
         }
 
-        self.rollup_function = self._create_function("RollupFunction", environment)
+        self.rollup_function = self._create_function(
+            "RollupFunction",
+            environment,
+            function_name=prefixed_function_name(name_prefix, "records-rollup"),
+            description=(
+                "Drains the rollup queue and MERGEs changed records into the "
+                "Iceberg records table"
+            ),
+        )
         self.reconcile_function = self._create_function(
-            "ReconcileFunction", environment
+            "ReconcileFunction",
+            environment,
+            function_name=prefixed_function_name(name_prefix, "records-reconcile"),
+            description=(
+                "Compares the records S3 inventory against the Iceberg records "
+                "table and re-queues any drift for the rollup"
+            ),
         )
 
         bucket_arn = f"arn:aws:s3:::{processing_bucket.bucket_name}"
@@ -315,7 +344,12 @@ class RecordsRollupFunction(Construct):
         )
 
     def _create_function(
-        self, construct_id: str, environment: dict[str, str]
+        self,
+        construct_id: str,
+        environment: dict[str, str],
+        *,
+        function_name: str | None,
+        description: str,
     ) -> lambda_.Function:
         """Build one rollup/reconcile Lambda from the shared handler asset.
 
@@ -326,6 +360,10 @@ class RecordsRollupFunction(Construct):
         environment : dict[str, str]
             Environment variables read by
             batch_event_job_monitor.handlers.rollup_handler.
+        function_name : str or None
+            Physical function name, or None to let CloudFormation generate it.
+        description : str
+            What this function does, since both share one handler.
 
         Returns
         -------
@@ -336,6 +374,8 @@ class RecordsRollupFunction(Construct):
         function = lambda_.Function(
             self,
             construct_id,
+            function_name=function_name,
+            description=description,
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="batch_event_job_monitor.handlers.rollup_handler.handler",
             code=lambda_.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),

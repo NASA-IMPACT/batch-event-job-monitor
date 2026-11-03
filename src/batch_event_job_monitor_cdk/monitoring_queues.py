@@ -28,6 +28,8 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from batch_event_job_monitor_cdk.naming import queue_name
+
 
 class MonitoringQueues(Construct):
     """The retry, dead-letter, and untracked-job queues for a job monitor.
@@ -84,6 +86,13 @@ class MonitoringQueues(Construct):
         aws-cdk-lib's own queue default (DESTROY). Pass
         RemovalPolicy.RETAIN to keep undelivered evidence when the stack
         is destroyed.
+    name_prefix : str or None, optional
+        Prefix for readable queue names: ``{name_prefix}-retry-queue``,
+        ``-retry-dlq``, ``-failure-dlq``, ``-untracked-queue``, and
+        ``-event-dlq``. Defaults to None, leaving the names to CloudFormation.
+        Must be unique per account and region. See "Naming resources" in
+        docs/constructs.md before setting or changing it on a deployed stack:
+        it replaces the queues, and fixed names block later replacements.
 
     Attributes
     ----------
@@ -115,6 +124,7 @@ class MonitoringQueues(Construct):
         data_key_reuse: Duration | None = None,
         enforce_ssl: bool = True,
         removal_policy: RemovalPolicy | None = None,
+        name_prefix: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -144,10 +154,16 @@ class MonitoringQueues(Construct):
 
         self.retry_dlq: sqs.Queue | None = None
         if retry_queue is None:
-            self.retry_dlq = sqs.Queue(self, "RetryDlq", **queue_props)
+            self.retry_dlq = sqs.Queue(
+                self,
+                "RetryDlq",
+                queue_name=queue_name(name_prefix, "retry-dlq"),
+                **queue_props,
+            )
             self.retry_queue: sqs.IQueue = sqs.Queue(
                 self,
                 "RetryQueue",
+                queue_name=queue_name(name_prefix, "retry-queue"),
                 visibility_timeout=visibility_timeout,
                 dead_letter_queue=sqs.DeadLetterQueue(
                     max_receive_count=max_receive_count,
@@ -159,7 +175,20 @@ class MonitoringQueues(Construct):
             self.retry_queue = retry_queue
 
         self.failure_dlq: sqs.IQueue = failure_dlq or sqs.Queue(
-            self, "FailureDlq", **queue_props
+            self,
+            "FailureDlq",
+            queue_name=queue_name(name_prefix, "failure-dlq"),
+            **queue_props,
         )
-        self.untracked_queue = sqs.Queue(self, "UntrackedQueue", **queue_props)
-        self.event_dlq = sqs.Queue(self, "EventDlq", **queue_props)
+        self.untracked_queue = sqs.Queue(
+            self,
+            "UntrackedQueue",
+            queue_name=queue_name(name_prefix, "untracked-queue"),
+            **queue_props,
+        )
+        self.event_dlq = sqs.Queue(
+            self,
+            "EventDlq",
+            queue_name=queue_name(name_prefix, "event-dlq"),
+            **queue_props,
+        )

@@ -29,8 +29,12 @@ from constructs import Construct
 
 from batch_event_job_monitor.models import JobTypeConfig
 from batch_event_job_monitor_cdk.lambda_asset import HANDLER_ENTRY, HANDLER_EXCLUDE
+from batch_event_job_monitor_cdk.naming import (
+    function_name as prefixed_function_name,
+)
 
 _DEFAULT_HANDLER_PATH = "batch_event_job_monitor.handlers.job_resubmit_handler.handler"
+_DESCRIPTION = "Resubmits failed AWS Batch jobs from the retry queue"
 
 
 class JobResubmitFunction(Construct):
@@ -76,7 +80,13 @@ class JobResubmitFunction(Construct):
         config it needs beyond PROCESSING_JOB_TYPE_CONFIGS, which is
         always set).
     function_name : str or None, optional
-        Explicit Lambda function name.
+        Explicit Lambda function name. Takes precedence over name_prefix.
+    name_prefix : str or None, optional
+        Prefix for a readable name: the function becomes
+        ``{name_prefix}-job-resubmit``. Defaults to None, leaving the name to
+        CloudFormation. Must be unique per account and region. See "Naming
+        resources" in docs/constructs.md before setting or changing it on a
+        deployed stack.
     memory_size : int, optional
         Lambda memory size in MB. Defaults to 256.
     timeout : Duration, optional
@@ -112,6 +122,7 @@ class JobResubmitFunction(Construct):
         include_describe_jobs: bool = True,
         environment: dict[str, str] | None = None,
         function_name: str | None = None,
+        name_prefix: str | None = None,
         memory_size: int = 256,
         timeout: Duration = Duration.minutes(1),
         batch_size: int = 100,
@@ -137,6 +148,9 @@ class JobResubmitFunction(Construct):
             **(environment or {}),
         }
 
+        resolved_name = function_name or prefixed_function_name(
+            name_prefix, "job-resubmit"
+        )
         if entry is None:
             self.function = _lambda.Function(
                 self,
@@ -144,7 +158,8 @@ class JobResubmitFunction(Construct):
                 runtime=_lambda.Runtime.PYTHON_3_12,
                 handler=_DEFAULT_HANDLER_PATH,
                 code=_lambda.Code.from_asset(HANDLER_ENTRY, exclude=HANDLER_EXCLUDE),
-                function_name=function_name,
+                function_name=resolved_name,
+                description=_DESCRIPTION,
                 memory_size=memory_size,
                 timeout=timeout,
                 environment=full_environment,
@@ -158,7 +173,8 @@ class JobResubmitFunction(Construct):
                 index=index,
                 handler=handler,
                 runtime=_lambda.Runtime.PYTHON_3_12,
-                function_name=function_name,
+                function_name=resolved_name,
+                description=_DESCRIPTION,
                 memory_size=memory_size,
                 timeout=timeout,
                 environment=full_environment,
