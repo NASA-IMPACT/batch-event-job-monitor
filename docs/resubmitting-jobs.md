@@ -51,6 +51,7 @@ A starting point for `lambda/job_resubmit/handler.py`:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,8 @@ from batch_event_job_monitor.models import JobTypeConfig
 if TYPE_CHECKING:
     from aws_lambda_typing.context import Context
     from aws_lambda_typing.events import SQSEvent
+
+logger = logging.getLogger(__name__)
 
 _batch_client = boto3.client("batch")
 
@@ -99,6 +102,11 @@ def handler(event: SQSEvent, context: Context) -> dict[str, list[dict[str, str]]
                 job_group=message.job_group,
             )
         except Exception:
+            logger.exception(
+                "Failed to resubmit SQS message %s: %s",
+                record["messageId"],
+                record["body"],
+            )
             batch_item_failures.append({"itemIdentifier": record["messageId"]})
 
     return {"batchItemFailures": batch_item_failures}

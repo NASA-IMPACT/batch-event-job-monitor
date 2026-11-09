@@ -157,6 +157,7 @@ class TestIamGrants:
                                     "Resource": Match.array_with(
                                         [
                                             _JOB_QUEUE_ARN,
+                                            _JOB_DEFINITION_ARN,
                                             f"{_JOB_DEFINITION_ARN}:*",
                                         ]
                                     ),
