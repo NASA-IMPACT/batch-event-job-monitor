@@ -24,6 +24,19 @@ _BODY = RetryMessage(
     batch_job_id="job-1",
     state="FAILURE",
 ).to_json()
+_BODY_WITH_SUBMISSION = json.dumps(
+    {
+        **json.loads(_BODY),
+        "submit_params": {
+            "containerOverrides": {
+                "command": ["--tile-id", "14TPN"],
+                "environment": [{"name": "OUTPUT_BUCKET", "value": "secret-out"}],
+            },
+            "parameters": {"scene": "abc"},
+            "timeout": {"attemptDurationSeconds": 3600},
+        },
+    }
+)
 
 
 @pytest.fixture
@@ -68,6 +81,7 @@ def test_submits_the_next_attempt_and_reports_no_failures(
     params = handler_module._batch_client.submit_job.call_args.kwargs
     assert params["jobDefinition"] == _JOB_DEFINITION_ARN
     assert params["parameters"]["bejm_attempt"] == "2"
+    assert "containerOverrides" not in params
     assert not caplog.records
 
 
@@ -96,3 +110,42 @@ def test_unparseable_body_is_logged_with_the_body_and_reported(
     assert record.levelno == logging.ERROR
     assert "not json" in record.getMessage()
     handler_module._batch_client.submit_job.assert_not_called()
+
+
+def test_malformed_message_is_reported_without_logging_the_body(
+    handler_module: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    body = json.dumps({**json.loads(_BODY_WITH_SUBMISSION), "unexpected": "field"})
+
+    result = _invoke(handler_module, body)
+
+    assert result == {"batchItemFailures": [{"itemIdentifier": _MESSAGE_ID}]}
+    (record,) = caplog.records
+    assert "secret-out" not in record.getMessage()
+
+
+def test_retry_replays_what_the_failed_job_ran(handler_module: Any) -> None:
+    _invoke(handler_module, _BODY_WITH_SUBMISSION)
+
+    params = handler_module._batch_client.submit_job.call_args.kwargs
+    assert params["containerOverrides"] == {
+        "command": ["--tile-id", "14TPN"],
+        "environment": [{"name": "OUTPUT_BUCKET", "value": "secret-out"}],
+    }
+    assert params["timeout"] == {"attemptDurationSeconds": 3600}
+    assert params["parameters"]["scene"] == "abc"
+    assert params["parameters"]["bejm_attempt"] == "2"
+    assert params["jobQueue"] == _JOB_QUEUE_ARN
+    assert params["jobDefinition"] == _JOB_DEFINITION_ARN
+
+
+def test_submit_failure_does_not_log_the_job_environment(
+    handler_module: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    handler_module._batch_client.submit_job.side_effect = _access_denied()
+
+    _invoke(handler_module, _BODY_WITH_SUBMISSION)
+
+    (record,) = caplog.records
+    assert "secret-out" not in record.getMessage()
+    assert "job-1" in record.getMessage()

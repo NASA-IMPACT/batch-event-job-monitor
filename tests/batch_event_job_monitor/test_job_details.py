@@ -309,6 +309,85 @@ class TestEnvironment:
         assert JobDetails.from_event(make_detail()).environment == {}
 
 
+class TestSubmitParams:
+    def test_captures_what_the_job_ran_with(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                container={
+                    "image": "repo/image:tag",
+                    "command": ["--tile-id", "14TPN"],
+                    "environment": [{"name": "OUTPUT_BUCKET", "value": "out"}],
+                    "vcpus": 4,
+                    "memory": 8000,
+                    "resourceRequirements": [
+                        {"type": "VCPU", "value": "4"},
+                        {"type": "MEMORY", "value": "8000"},
+                    ],
+                    "logStreamName": "job/default/abc",
+                },
+                parameters={
+                    "bejm_job_type": "monthly-composite",
+                    "bejm_attempt": "1",
+                    "scene": "abc",
+                },
+                timeout={"attemptDurationSeconds": 3600},
+                retryStrategy={"attempts": 2, "evaluateOnExit": []},
+                propagateTags=False,
+                tags={"project": "hls"},
+                schedulingPriority=5,
+                shareIdentifier="share-a",
+            )
+        )
+
+        assert job_details.submit_params == {
+            "containerOverrides": {
+                "command": ["--tile-id", "14TPN"],
+                "environment": [{"name": "OUTPUT_BUCKET", "value": "out"}],
+            },
+            "parameters": {"scene": "abc"},
+            "timeout": {"attemptDurationSeconds": 3600},
+            "retryStrategy": {"attempts": 2, "evaluateOnExit": []},
+            "propagateTags": False,
+            "tags": {"project": "hls"},
+            "schedulingPriorityOverride": 5,
+            "shareIdentifier": "share-a",
+        }
+
+    def test_drops_environment_reserved_by_batch(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                container={
+                    "environment": [
+                        {"name": "AWS_BATCH_JOB_ID", "value": "job-123"},
+                        {"name": "GRANULE", "value": "LC08_X"},
+                    ]
+                }
+            )
+        )
+
+        assert job_details.submit_params["containerOverrides"]["environment"] == [
+            {"name": "GRANULE", "value": "LC08_X"}
+        ]
+
+    def test_drops_tags_reserved_by_aws(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(tags={"aws:batch:job": "x", "project": "hls"})
+        )
+
+        assert job_details.submit_params["tags"] == {"project": "hls"}
+
+    def test_omits_what_the_event_does_not_have(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                container={"command": [], "environment": []},
+                parameters={"bejm_job_type": "monthly-composite"},
+                tags={},
+            )
+        )
+
+        assert job_details.submit_params == {}
+
+
 def make_bejm_parameters(**overrides: str) -> dict[str, str]:
     params = {
         "bejm_job_type": "monthly-composite",

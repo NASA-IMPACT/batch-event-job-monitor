@@ -4,11 +4,10 @@
 attempt. It bundles a generic default handler covering the common case, and can wrap a consumer-authored handler instead
 for anything the default can't express.
 
-## The default: each job_type's own job queue and job definition every attempt
+## The default: replay what the failed job ran
 
-If resubmission always reuses a job_type's own Batch job queue and job definition -- no per-attempt
-`containerOverrides`, no computed command -- the default handler needs zero consumer-authored Python. Pass the same
-`job_type_configs` mapping given to `JobMonitorFunction`:
+The default handler resubmits a job with what its failed attempt ran with and needs zero consumer-authored Python. Pass
+the same `job_type_configs` mapping given to `JobMonitorFunction`:
 
 ```python
 from batch_event_job_monitor_cdk import JobResubmitFunction
@@ -25,11 +24,36 @@ The default handler (`batch_event_job_monitor.handlers.job_resubmit_handler`) pa
 `RetryMessage`, looks up that message's `job_type` in the construct's `PROCESSING_JOB_TYPE_CONFIGS` environment
 variable, calls `resubmit_job` with `jobQueue`/`jobDefinition` from that job_type's `JobTypeConfig`, and reports
 per-record failures via `batchItemFailures` so a single bad message doesn't fail the whole batch. The `batch:SubmitJob`
-IAM grant is scoped to the union of every listed job_type's queue/job definition.
+IAM grant is scoped to the union of every listed job_type's queue/job definition, and `batch:TagResource` covers the
+tags replayed onto new jobs.
+
+### What gets replayed
+
+`monitor_job` records two fields on every `RetryMessage`, on both the retry queue and the failure DLQ:
+
+- `job_definition`: the job definition ARN the failed job ran, revision included.
+- `submit_params`: `SubmitJob` kwargs built from the failure event's job detail: `containerOverrides` (`command`,
+  `environment`), non-`bejm_*` `parameters`, `timeout`, `retryStrategy`, `propagateTags`, `tags`,
+  `schedulingPriorityOverride`, and `shareIdentifier`.
+
+The retry runs on the latest active revision of the job definition, so a new revision's image, CPU, memory, and newly
+added environment variables take effect. Resources always come from the job definition, so a `resourceRequirements`
+override on the original submission does not carry over to the retry. Batch reports a job's resolved container rather
+than the overrides it was submitted with, so the failed job's command and environment are pinned: a command or
+environment variable changed in a newer revision keeps its old value on retry.
+
+`environment` values travel in the SQS message body. Put sensitive values in the job definition's `secrets`, which are
+not recorded.
+
+Only single-container jobs are replayed. `dependsOn` is not, since a retry should not wait on its original dependencies,
+and neither are array, multi-node, ECS-properties, or EKS job settings.
+
+Messages published before these fields existed resubmit with no overrides.
 
 ## Overriding: custom `containerOverrides`, a computed command, or job introspection
 
-Some job types need more: different container overrides per attempt, a command built from the job's identity fields, or
+Custom handlers receive the same `RetryMessage` and can use `message.submit_params` directly. Some job types need more:
+different container overrides per attempt, a command built from the job's identity fields, or
 `batch:DescribeJobs`-driven introspection of the original job. For those, supply your own `entry`/`index` --
 `JobResubmitFunction` wires the same SQS event source, IAM permissions, and `PROCESSING_JOB_TYPE_CONFIGS` environment
 variable around your handler instead of the bundled default:
@@ -102,11 +126,8 @@ def handler(event: SQSEvent, context: Context) -> dict[str, list[dict[str, str]]
                 job_group=message.job_group,
             )
         except Exception:
-            logger.exception(
-                "Failed to resubmit SQS message %s: %s",
-                record["messageId"],
-                record["body"],
-            )
+            # The body can carry the job's environment, so it stays out of the logs.
+            logger.exception("Failed to resubmit SQS message %s", record["messageId"])
             batch_item_failures.append({"itemIdentifier": record["messageId"]})
 
     return {"batchItemFailures": batch_item_failures}
