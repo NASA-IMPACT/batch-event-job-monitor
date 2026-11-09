@@ -184,10 +184,16 @@ class JobResubmitFunction(Construct):
         actions = ["batch:SubmitJob"]
         if include_describe_jobs:
             actions.append("batch:DescribeJobs")
+        # SubmitJob authorizes against the job definition ARN as submitted, and
+        # `{family}:*` does not match the bare family ARN.
         resources = dict.fromkeys(
             arn
             for config in job_type_configs.values()
-            for arn in (config.job_queue_arn, f"{config.job_definition_arn}:*")
+            for arn in (
+                config.job_queue_arn,
+                config.job_definition_arn,
+                f"{config.job_definition_arn}:*",
+            )
         )
         self.function.add_to_role_policy(
             iam.PolicyStatement(actions=actions, resources=list(resources))
