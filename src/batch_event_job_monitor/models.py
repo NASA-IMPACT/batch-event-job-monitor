@@ -508,6 +508,11 @@ class RetryMessage:
     state) rather than nesting a `job_group: JobGroup` field, so the JSON
     wire format stays a single flat object instead of nesting `job_group`
     under its own key.
+
+    `job_definition` is the ARN the failed job ran, revision included.
+    `submit_params` holds the SubmitJob kwargs that reproduce what it ran with
+    (see `JobDetails.submit_params`), including its environment variables.
+    Both are None on messages published before they were recorded.
     """
 
     job_type: str
@@ -517,13 +522,27 @@ class RetryMessage:
     attempt: int
     batch_job_id: str
     state: str
+    job_definition: str | None = None
+    submit_params: dict[str, Any] | None = None
 
     @classmethod
     def from_job_group(
-        cls, job_group: JobGroup, *, batch_job_id: str, state: str
+        cls,
+        job_group: JobGroup,
+        *,
+        batch_job_id: str,
+        state: str,
+        job_definition: str | None = None,
+        submit_params: dict[str, Any] | None = None,
     ) -> RetryMessage:
-        """Build a RetryMessage from a JobGroup plus the Batch job id and state."""
-        return cls(**asdict(job_group), batch_job_id=batch_job_id, state=state)
+        """Build a RetryMessage from a JobGroup and details of the failed job."""
+        return cls(
+            **asdict(job_group),
+            batch_job_id=batch_job_id,
+            state=state,
+            job_definition=job_definition,
+            submit_params=submit_params,
+        )
 
     @property
     def job_group(self) -> JobGroup:

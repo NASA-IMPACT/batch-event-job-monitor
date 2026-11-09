@@ -29,6 +29,19 @@ _REQUIRED_PARAM_KEYS = (
 # between them (queueing vs. actually running) is not tracked.
 _AWAITING_STATUSES = frozenset({"PENDING", "RUNNABLE", "STARTING", "RUNNING"})
 
+# Job detail fields SubmitJob accepts back, mapped to their SubmitJob names.
+_RESUBMITTED_JOB_FIELDS = {
+    "timeout": "timeout",
+    "retryStrategy": "retryStrategy",
+    "propagateTags": "propagateTags",
+    "schedulingPriority": "schedulingPriorityOverride",
+    "shareIdentifier": "shareIdentifier",
+}
+
+# SubmitJob rejects environment variables and tags with these prefixes.
+_RESERVED_ENVIRONMENT_PREFIX = "AWS_BATCH_"
+_RESERVED_TAG_PREFIX = "aws:"
+
 
 def _from_epoch_ms(value: int | None) -> datetime | None:
     if value is None:
@@ -223,6 +236,49 @@ class JobDetails:
     def parameters(self) -> dict[str, str]:
         """AWS Batch SubmitJobRequest.parameters echoed back on this job."""
         return self._typed_raw.get("parameters") or {}
+
+    @property
+    def submit_params(self) -> dict[str, Any]:
+        """SubmitJob kwargs that reproduce what this job ran with.
+
+        Batch reports a job's resolved container rather than the overrides it
+        was submitted with, so `containerOverrides` also pins any command and
+        environment values that came from the job definition. CPU, memory, and
+        other resources are left to the job definition. Excludes jobName,
+        jobQueue, and jobDefinition, which the resubmitter chooses, and the
+        bejm_* parameters, which identify a single attempt.
+        """
+        container = self.raw.get("container") or {}
+        overrides: dict[str, Any] = {}
+        if command := container.get("command"):
+            overrides["command"] = command
+        if environment := [
+            variable
+            for variable in container.get("environment") or []
+            if not variable["name"].startswith(_RESERVED_ENVIRONMENT_PREFIX)
+        ]:
+            overrides["environment"] = environment
+
+        params: dict[str, Any] = {}
+        if overrides:
+            params["containerOverrides"] = overrides
+        if parameters := {
+            key: value
+            for key, value in self.parameters.items()
+            if not key.startswith(PARAM_PREFIX)
+        }:
+            params["parameters"] = parameters
+        if tags := {
+            key: value
+            for key, value in (self.raw.get("tags") or {}).items()
+            if not key.startswith(_RESERVED_TAG_PREFIX)
+        }:
+            params["tags"] = tags
+        for detail_field, submit_field in _RESUBMITTED_JOB_FIELDS.items():
+            value = self.raw.get(detail_field)
+            if value is not None:
+                params[submit_field] = value
+        return params
 
     @property
     def is_tracked(self) -> bool:

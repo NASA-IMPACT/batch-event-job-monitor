@@ -140,6 +140,19 @@ class TestCustomHandlerOverride:
 
 
 class TestIamGrants:
+    def test_can_tag_resubmitted_jobs(self) -> None:
+        stack, _ = _make_stack()
+        policies = Template.from_stack(stack).find_resources("AWS::IAM::Policy")
+
+        (statement,) = [
+            statement
+            for policy in policies.values()
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+            if statement["Action"] == "batch:TagResource"
+        ]
+
+        assert ":job/*" in json.dumps(statement["Resource"])
+
     def test_submit_job_and_describe_jobs_by_default(self) -> None:
         stack, _ = _make_stack()
         template = Template.from_stack(stack)

@@ -184,16 +184,21 @@ def monitor_job(
         # it once, not once per entity.
         log_store.write_output_index(context=contexts[0], state=new_state)
 
-    message_body = RetryMessage.from_job_group(
-        job_group, batch_job_id=job.job_id, state=new_state.name
-    ).to_json()
-
+    queue_url = None
     if new_state.retryable and not terminal:
-        if retry_queue_url is not None:
-            sqs_client.send_message(QueueUrl=retry_queue_url, MessageBody=message_body)
+        queue_url = retry_queue_url
     elif terminal and new_state != ProcessingStates.SUCCESS and new_state.dlq:
-        if dlq_url is not None:
-            sqs_client.send_message(QueueUrl=dlq_url, MessageBody=message_body)
+        queue_url = dlq_url
+
+    if queue_url is not None:
+        message = RetryMessage.from_job_group(
+            job_group,
+            batch_job_id=job.job_id,
+            state=new_state.name,
+            job_definition=job.job_definition,
+            submit_params=job.submit_params,
+        )
+        sqs_client.send_message(QueueUrl=queue_url, MessageBody=message.to_json())
 
     return new_state
 

@@ -2,9 +2,9 @@
 
 Bundles a generic default handler (see
 batch_event_job_monitor.handlers.job_resubmit_handler) covering the common
-case -- reuse each job_type's own Batch job queue/job definition every
-attempt, no custom containerOverrides -- with zero consumer-authored
-Python, the same way JobMonitorFunction does.
+case -- replay what the failed job ran with on each job_type's own Batch job
+queue/job definition -- with zero consumer-authored Python, the same way
+JobMonitorFunction does.
 
 For anything the default can't express (per-attempt container overrides, a
 computed command, batch:DescribeJobs-driven introspection of the original
@@ -19,6 +19,7 @@ from typing import Any
 
 from aws_cdk import (
     Duration,
+    Stack,
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_lambda_event_sources as event_sources,
@@ -197,6 +198,17 @@ class JobResubmitFunction(Construct):
         )
         self.function.add_to_role_policy(
             iam.PolicyStatement(actions=actions, resources=list(resources))
+        )
+        # SubmitJob authorizes the tags it applies against the new job's ARN.
+        self.function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["batch:TagResource"],
+                resources=[
+                    Stack.of(self).format_arn(
+                        service="batch", resource="job", resource_name="*"
+                    )
+                ],
+            )
         )
 
         self.event_source_mapping = event_sources.SqsEventSource(

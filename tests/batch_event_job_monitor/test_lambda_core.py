@@ -295,6 +295,46 @@ class TestFailureRetryableWithAttemptsRemaining:
         assert _receive_all(sqs, dlq_url) == []
 
 
+class TestFailureMessagesCarrySubmission:
+    @pytest.mark.parametrize(
+        ("max_attempts", "queue"),
+        [(3, "retry_queue_url"), (1, "dlq_url")],
+    )
+    def test_message_records_what_the_job_ran_with(
+        self,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        request: pytest.FixtureRequest,
+        max_attempts: int,
+        queue: str,
+    ) -> None:
+        _seed_awaiting(store)
+        monitor_job(
+            detail=make_detail(
+                status="FAILED",
+                statusReason="Host EC2 instance terminated",
+                jobDefinition="arn:aws:batch:us-west-2:1:job-definition/def:7",
+                container={"command": ["--tile-id", "12TVK"]},
+            ),
+            log_store=store,
+            job_group=dataclasses.replace(JOB_GROUP, attempt=1),
+            retry_policy=RetryPolicy(max_attempts=max_attempts),
+            retry_queue_url=request.getfixturevalue("retry_queue_url"),
+            dlq_url=request.getfixturevalue("dlq_url"),
+            sqs_client=sqs,
+            event_time=FIXED_NOW,
+        )
+
+        (message,) = _receive_all(sqs, request.getfixturevalue(queue))
+        body = json.loads(message["Body"])
+        assert body["job_definition"] == (
+            "arn:aws:batch:us-west-2:1:job-definition/def:7"
+        )
+        assert body["submit_params"] == {
+            "containerOverrides": {"command": ["--tile-id", "12TVK"]}
+        }
+
+
 class TestFailureRetryableAttemptsExhausted:
     def test_writes_output_index_and_sends_to_dlq_not_retry_queue(
         self,

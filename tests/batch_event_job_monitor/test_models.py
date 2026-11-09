@@ -474,11 +474,35 @@ class TestRetryMessage:
             "attempt": 1,
             "batch_job_id": "batch-123",
             "state": "FAILURE_RETRYABLE",
+            "job_definition": None,
+            "submit_params": None,
         }
+
+    def test_from_json_accepts_messages_without_submission_details(self) -> None:
+        body = json.dumps(
+            {
+                "job_type": "monthly-composite",
+                "partition_fields": {"tile_id": "12TVK"},
+                "input_entity_ids": ["12TVK_2024-06_source"],
+                "output_entity_id": "12TVK_2024-06_output",
+                "attempt": 1,
+                "batch_job_id": "batch-123",
+                "state": "FAILURE_RETRYABLE",
+            }
+        )
+
+        message = RetryMessage.from_json(body)
+
+        assert message.job_definition is None
+        assert message.submit_params is None
 
     def test_from_json_round_trips(self) -> None:
         message = RetryMessage.from_job_group(
-            self._job_group(), batch_job_id="batch-123", state="FAILURE_RETRYABLE"
+            self._job_group(),
+            batch_job_id="batch-123",
+            state="FAILURE_RETRYABLE",
+            job_definition="arn:aws:batch:us-west-2:1:job-definition/def:7",
+            submit_params={"containerOverrides": {"command": ["run"]}},
         )
         assert RetryMessage.from_json(message.to_json()) == message
 
