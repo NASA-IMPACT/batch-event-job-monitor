@@ -24,8 +24,9 @@ The default handler (`batch_event_job_monitor.handlers.job_resubmit_handler`) pa
 `RetryMessage`, looks up that message's `job_type` in the construct's `PROCESSING_JOB_TYPE_CONFIGS` environment
 variable, calls `resubmit_job` with `jobQueue`/`jobDefinition` from that job_type's `JobTypeConfig`, and reports
 per-record failures via `batchItemFailures` so a single bad message doesn't fail the whole batch. The `batch:SubmitJob`
-IAM grant is scoped to the union of every listed job_type's queue/job definition, and `batch:TagResource` covers the
-tags replayed onto new jobs.
+IAM grant is scoped to the union of every listed job_type's queue/job definition. `batch:TagResource` covers the tags
+replayed onto new jobs; Batch authorizes it against those same queues/job definitions as well as the new job, so it is
+granted on both.
 
 ### What gets replayed
 

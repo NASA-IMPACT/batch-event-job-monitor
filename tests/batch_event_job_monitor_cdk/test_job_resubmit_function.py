@@ -165,7 +165,11 @@ class TestIamGrants:
                             Match.object_like(
                                 {
                                     "Action": Match.array_with(
-                                        ["batch:SubmitJob", "batch:DescribeJobs"]
+                                        [
+                                            "batch:SubmitJob",
+                                            "batch:TagResource",
+                                            "batch:DescribeJobs",
+                                        ]
                                     ),
                                     "Resource": Match.array_with(
                                         [

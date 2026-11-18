@@ -182,11 +182,14 @@ class JobResubmitFunction(Construct):
                 bundling=bundling,
             )
 
-        actions = ["batch:SubmitJob"]
+        actions = ["batch:SubmitJob", "batch:TagResource"]
         if include_describe_jobs:
             actions.append("batch:DescribeJobs")
+
         # SubmitJob authorizes against the job definition ARN as submitted, and
-        # `{family}:*` does not match the bare family ARN.
+        # `{family}:*` does not match the bare family ARN. Replayed tags are
+        # authorized (batch:TagResource) against these same resources as well as
+        # the new job's ARN below.
         resources = dict.fromkeys(
             arn
             for config in job_type_configs.values()
@@ -199,7 +202,7 @@ class JobResubmitFunction(Construct):
         self.function.add_to_role_policy(
             iam.PolicyStatement(actions=actions, resources=list(resources))
         )
-        # SubmitJob authorizes the tags it applies against the new job's ARN.
+        # SubmitJob also authorizes the tags it applies against the new job's ARN.
         self.function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["batch:TagResource"],
