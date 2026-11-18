@@ -376,6 +376,15 @@ class TestSubmitParams:
 
         assert job_details.submit_params["tags"] == {"project": "hls"}
 
+    def test_drops_resource_arn_reported_as_a_tag(self) -> None:
+        job_details = JobDetails.from_event(
+            make_detail(
+                tags={"resourceArn": "arn:aws:batch:us-west-2:123456789012:job/abc"}
+            )
+        )
+
+        assert "tags" not in job_details.submit_params
+
     def test_omits_what_the_event_does_not_have(self) -> None:
         job_details = JobDetails.from_event(
             make_detail(

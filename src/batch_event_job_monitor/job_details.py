@@ -42,6 +42,11 @@ _RESUBMITTED_JOB_FIELDS = {
 _RESERVED_ENVIRONMENT_PREFIX = "AWS_BATCH_"
 _RESERVED_TAG_PREFIX = "aws:"
 
+# Batch state change events report the job's own ARN under this key in `tags`;
+# it is not a tag on the job (undocumented, see
+# https://github.com/aws/aws-sdk-java/issues/3029).
+_EVENT_RESOURCE_ARN_TAG = "resourceArn"
+
 
 def _from_epoch_ms(value: int | None) -> datetime | None:
     if value is None:
@@ -272,6 +277,7 @@ class JobDetails:
             key: value
             for key, value in (self.raw.get("tags") or {}).items()
             if not key.startswith(_RESERVED_TAG_PREFIX)
+            and key != _EVENT_RESOURCE_ARN_TAG
         }:
             params["tags"] = tags
         for detail_field, submit_field in _RESUBMITTED_JOB_FIELDS.items():
